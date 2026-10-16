@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsAppClient
+GenericName=WhatsApp Multi-Account Client
+Comment=Run multiple WhatsApp Web accounts
+Exec=/home/${USER}/Apps/WhatsAppClient-x86_64.AppImage
+Icon=whatsapp
+Categories=Network;Chat;
+Terminal=false
+StartupWMClass=WhatsAppClient

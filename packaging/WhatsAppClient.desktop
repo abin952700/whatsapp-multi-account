@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsAppClient
+Exec=WhatsAppClient
+Icon=whatsapp
+Categories=Network;Chat;

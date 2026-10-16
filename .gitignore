@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+env/
+venv/
+build/
+dist/
+*.spec
+*.log
+.DS_Store
+*.AppImage
+AppDir/
+.pyinstaller-cache/

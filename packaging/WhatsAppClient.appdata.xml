@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>com.github.sejanh.whatsappclient</id>
+  <name>WhatsAppClient</name>
+  <summary>WhatsApp multi-account desktop client</summary>
+  <description>
+    <p>Run multiple WhatsApp Web accounts in a single desktop window using tabs so you can switch quickly between personal and work sessions.</p>
+    <p>Each account uses its own profile storage so personal and work sessions stay separate.</p>
+  </description>
+  <launchable type="desktop-id">WhatsAppClient.desktop</launchable>
+  <developer id="com.github.sejanh">
+    <name>sejanH</name>
+  </developer>
+  <url type="homepage">https://github.com/sejanH/whatsapp-multi-account</url>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <content_rating type="oars-1.1" />
+</component>
