@@ -83,6 +83,11 @@ if __name__ == "__main__":
             from app.proxy_extension import apply_proxy_mode
             from app.windows_account import WindowsWorkerState
             profile = sys.argv[sys.argv.index(worker_flag) + 1]
+            worker_token = ""
+            if "--worker-token" in sys.argv:
+                token_position = sys.argv.index("--worker-token")
+                if token_position + 1 < len(sys.argv):
+                    worker_token = sys.argv[token_position + 1]
             config = next(item for item in load_accounts() if item.get("profile_name") == profile)
             mode = str(config.get("proxy_mode") or "none")
             custom = str(config.get("proxy_url") or "")
@@ -95,17 +100,14 @@ if __name__ == "__main__":
             elif worker_flag == "--windows-account-worker":
                 # 工作窗口只用于嵌入主程序：先放到屏幕外且不激活，避免
                 # QWindow.fromWinId 接管前短暂显示成独立窗口或任务栏窗口。
-                window.setWindowFlags(
-                    window.windowFlags()
-                    | Qt.WindowType.Tool
-                    | Qt.WindowType.FramelessWindowHint
-                )
                 window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
                 window.move(-32000, -32000)
             account = WhatsAppAccount(profile, proxy_url=proxy)
             window.setCentralWidget(account)
             window.resize(1200, 900); window.show()
-            window._state = WindowsWorkerState(profile, window, account)
+            window._state = WindowsWorkerState(
+                profile, window, account, worker_token=worker_token
+            )
             account.request_load()
             sys.exit(app.exec())
         from app.window import MainWindow

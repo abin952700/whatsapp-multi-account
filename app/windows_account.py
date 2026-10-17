@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import time
+import uuid
 
 from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QWindow
@@ -42,10 +43,12 @@ class WindowsAccountProcess(QWidget):
         self.phone_number = ""
         self.process = QProcess(self)
         self.process.finished.connect(self._finished)
+        self.process.errorOccurred.connect(self._process_error)
         self._restart = False
         self._foreign = None
         self._container = None
         self._last_state = None
+        self._worker_token = ""
         self.layout = QVBoxLayout(self)
         self.label = QLabel("正在启动账号进程…")
         self.layout.addWidget(self.label)
@@ -58,9 +61,16 @@ class WindowsAccountProcess(QWidget):
 
     def request_load(self):
         if self.process.state() != QProcess.ProcessState.NotRunning: return
+        self._worker_token = uuid.uuid4().hex
+        self._last_state = None
+        try:
+            os.unlink(ipc_path(self.profile_name, "state.json"))
+        except OSError:
+            pass
         args = [
             "--windows-account-worker", self.profile_name,
             "--instance", get_instance_name(),
+            "--worker-token", self._worker_token,
         ]
         if getattr(sys, "frozen", False):
             self.process.start(sys.executable, args)
@@ -85,15 +95,27 @@ class WindowsAccountProcess(QWidget):
     def _finished(self):
         if self._container:
             self._container.deleteLater(); self._container = None
+        self._foreign = None
         if self._restart:
             self._restart = False
             QTimer.singleShot(300, self.request_load)
+        else:
+            self.label.setText("账号进程已退出，请点击刷新当前")
+            self.label.show()
+
+    def _process_error(self, _error):
+        self.label.setText("账号进程启动失败，请点击刷新当前")
+        self.label.show()
 
     def _poll(self):
         try:
             with open(ipc_path(self.profile_name, "state.json"), encoding="utf-8") as file:
                 state = json.load(file)
         except (OSError, ValueError): return
+        # 忽略旧进程残留状态。单文件 PyInstaller 存在启动器和应用两个
+        # PID，因此使用显式令牌而不是 PID 判断进程归属。
+        if str(state.get("worker_token") or "") != self._worker_token:
+            return
         if state == self._last_state: return
         self._last_state = state
         hwnd = int(state.get("hwnd") or 0)
@@ -113,9 +135,16 @@ class WindowsAccountProcess(QWidget):
 
 
 class WindowsWorkerState:
-    def __init__(self, profile, window, account):
+    def __init__(self, profile, window, account, worker_token=""):
         self.profile, self.window = profile, window
-        self.state = {"pid": os.getpid(), "hwnd": int(window.winId()), "phone": "", "unread": 0, "notification": ""}
+        self.state = {
+            "pid": os.getpid(),
+            "worker_token": worker_token,
+            "hwnd": int(window.winId()),
+            "phone": "",
+            "unread": 0,
+            "notification": "",
+        }
         account.phone_number_changed.connect(self.phone)
         account.unread_count_changed.connect(self.unread)
         account.browser_notification.connect(self.notification)
