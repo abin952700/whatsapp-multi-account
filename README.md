@@ -1,56 +1,45 @@
-# WhatsApp Multi-Account Client
+# WhatsApp Multi-Account
 
-A PyQt6-based desktop application that allows you to run multiple WhatsApp Web accounts simultaneously in a single window using tabs. Each account maintains its own separate profile and storage, enabling you to use personal and business accounts simultaneously.
+基于 Python、PyQt6 和 Qt WebEngine 的 WhatsApp Web 多账号桌面客户端。程序在一个主界面内管理多个账号，为每个账号保存独立的浏览器资料、登录状态和代理设置。
 
-## Features
+> 本项目不是 WhatsApp 官方客户端。使用时应遵守 WhatsApp 服务条款以及所在地法律法规。
 
-- **Multi-Account Support**: Run multiple WhatsApp accounts simultaneously
-- **Tabbed Interface**: Easy switching between different accounts
-- **Persistent Sessions**: Each account maintains its own login session and cookies
-- **Separate Storage**: Unique storage path for each account profile
-- **Custom User-Agent**: Optimized user agent to avoid "Browser not supported" messages
+## 主要功能
 
-## Requirements
+- 多账号管理：添加账号，并以通讯录式列表单击切换当前账号。
+- 主窗口内嵌：macOS 不打开账号独立窗口，WhatsApp 页面显示在主界面右侧。
+- 登录持久化：Cookie、Local Storage、IndexedDB、Service Worker、缓存和站点权限按账号隔离并保存。
+- 账号自动命名：登录成功后从 WhatsApp 页面获取手机号，移除 `+`、空格及其他非数字字符后作为账号名称。
+- 独立代理：每个账号可选择无代理、系统代理、全局代理或自己的自定义代理。
+- HTTP、HTTPS、SOCKS5：支持带用户名和密码的代理地址。
+- 出口国家识别：通过账号代理查询真实出口 IP 的国家，而不是根据代理服务器地址猜测国家。
+- 本地代理网关：解决 Qt WebEngine 对 SOCKS5 认证、DNS 和 WebSocket 支持不一致的问题。
+- 通知聚合：将 WhatsApp 浏览器通知、未读数量和最近通知展示在账号列表中。
+- 页面刷新：顶部“刷新当前”会重建当前账号的代理连接并完整重新加载页面。
+- 配置持久化：账号、代理选择、全局设置以及最近选择的账号都会在下次启动时恢复。
 
-- Python 3.6 or higher
-- PyQt6
-- PyQt6-WebEngine
-- PyInstaller (for building the executable)
+## 界面和平台行为
 
-## Required Python Scripts
+### macOS
 
-- `main.py` — application entry point (multi-account UI and web views).
+macOS 使用单个主窗口，账号页面直接内嵌在右侧内容区，不创建独立窗口。Qt WebEngine 的应用代理属于进程级配置，因此同一时刻只激活一个账号页面：切换账号时程序会停止旧页面、切换到目标账号代理，然后加载目标页面。各账号的浏览器 Profile 和登录数据仍完全独立。
 
-## Installation
+### Windows
 
-### Prerequisites
+Windows 为每个账号创建独立的 WebEngine 工作进程，并将工作进程窗口嵌入主界面。这使不同账号可以拥有独立的进程级代理，同时用户仍在主窗口中操作。
 
-**Install system dependencies**:
-```bash
-# Ubuntu/Debian
-sudo apt-get install python3-pyqt6 python3-pyqt6.qtwebengine
-```
-```bash
-# Fedora/RHEL
-sudo dnf install python3-qt6 python3-qt6-webengine
-```
+## 代理工作原理
 
-**Install Python dependencies**:
-```bash
-pip install -r requirements.txt
-```
+代理模式包括：
 
-## Running
+| 模式 | 行为 |
+| --- | --- |
+| 无代理 | 不设置应用代理，使用操作系统当前网络路由 |
+| 系统代理 / VPN | 读取系统代理配置；系统 VPN 路由仍由操作系统处理 |
+| 全局代理 | 使用程序设置中的共享代理地址 |
+| 自定义代理 | 使用该账号单独保存的代理地址，新账号默认使用此模式 |
 
-```bash
-python3 main.py
-```
-
-## Per-account proxies
-
-Configure the shared proxy from **Menu > Global proxy settings**. When adding
-an account, choose either the global proxy or enter a custom proxy for that
-account. Supported formats include:
+支持以下格式：
 
 ```text
 http://host:port
@@ -59,109 +48,164 @@ https://username:password@host:port
 socks5://username:password@host:port
 ```
 
-Each account runs in its own WebEngine worker process. The worker applies that
-account's proxy before loading WhatsApp, so different accounts can remain online
-simultaneously without sharing an application-level proxy. The main window is an
-account controller; selecting an account opens its independent native window.
-Leave the global proxy setting empty to disable it. The account list resolves the
-proxy IP's country in the background and displays its flag and country name.
-Credentials are stored locally with the account configuration; protect access
-to your user account.
+### 本地网关链路
 
-## Persistent sessions
+对于全局代理和自定义代理，实际请求链路为：
 
-Account definitions, proxy choices, and the last selected account are restored
-on the next launch. Each account has a permanent isolated profile directory
-containing its WhatsApp cookies, local storage, IndexedDB, service workers,
-cache, and persisted permissions. On macOS this data is stored under:
+```text
+Qt WebEngine / Chromium
+        ↓ HTTP CONNECT（仅监听 127.0.0.1 随机端口）
+程序内置本地代理网关
+        ↓ 使用当前账号的 HTTP / HTTPS / SOCKS5 代理及认证信息
+上游代理
+        ↓
+WhatsApp Web
+```
+
+本地网关只绑定回环地址，不对局域网开放。它先通过本机网络环境解析目标域名，再把目标 IP 交给上游代理，兼容拒绝 SOCKS5 域名地址类型但允许 IP 地址连接的代理服务。程序同时禁用 Chromium QUIC，避免 UDP/443 绕过账号代理。
+
+系统 VPN 和账号代理可以同时存在：系统 VPN 是宿主机到上游代理服务器的网络路径，账号代理决定 WhatsApp 的最终出口。若 VPN 使用分流规则，应确保代理服务器地址可达。
+
+### 出口国家检测
+
+程序通过账号配置的上游代理访问 `ipwho.is`，以服务看到的实际出口 IP 返回国家代码和国家名称。检测请求不会使用系统直连结果，也不会仅查询代理主机 IP 的地理位置。
+
+## 数据持久化
+
+每个账号使用独立的 `QWebEngineProfile`。配置文件采用临时文件写入后原子替换，降低异常退出导致 JSON 损坏的风险。
+
+macOS 数据目录：
 
 ```text
 ~/Library/Application Support/WhatsAppClient/
 ```
 
-Do not delete this directory if you want to keep WhatsApp login sessions.
+Windows 数据目录：
 
-## AppImage (Linux)
+```text
+%APPDATA%\whatsapp-pyqt\
+```
 
-1. Install build tools (PyInstaller, appimagetool).
-2. Build the AppImage:
-   ```bash
-   bash scripts/build_appimage.sh
-   ```
+主要内容：
 
-The resulting `WhatsAppClient-x86_64.AppImage` will be created in the project root when `appimagetool` is available.
+```text
+accounts.json       账号、代理模式和代理地址
+settings.json       全局代理及界面设置
+<profile_name>/     对应账号的 Cookie、缓存和站点数据
+crash.log           Python 层异常日志
+```
 
-## macOS
+代理凭据以本地配置形式保存。请保护操作系统用户账号及应用数据目录，不要公开 `accounts.json` 和 `settings.json`。
 
-The following commands must be run on macOS. First, create the virtual
-environment and install dependencies:
+## 刷新和故障处理
+
+页面加载不完整时，先点击顶部“刷新当前”。该操作不是普通 DOM 刷新，而是：
+
+1. 取消尚未结束的加载和检测任务；
+2. 停止当前 WebEngine 页面并切换到空白页；
+3. 关闭旧的本地代理网关及连接；
+4. 重新应用当前账号代理；
+5. 检测代理并重新打开 WhatsApp Web。
+
+如果仍无法加载：
+
+- 确认相同代理能连接 `web.whatsapp.com:443`；
+- 检查代理用户名、密码、IP 白名单和并发连接限制；
+- 完全退出旧版本后再启动新构建；
+- 查看数据目录下的 `crash.log`；
+- VPN 分流环境下确认上游代理服务器没有被错误路由。
+
+## 开发环境
+
+- Python 3.9–3.14
+- PyQt6 6.10
+- PyQt6-WebEngine 6.10
+- PyInstaller 6.19
+
+安装依赖：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+从源码启动：
+
+```bash
+python main.py
+```
+
+## macOS 构建和启动
+
+首次准备环境：
 
 ```bash
 make mac-setup
 ```
 
-The setup script selects an installed Python version from 3.9 through 3.14;
-Python 3.15 is not supported by the pinned PyInstaller version. To choose an
-interpreter explicitly, run `MAC_PYTHON=/path/to/python3 make mac-setup`.
-
-Run directly from source:
+从源码启动：
 
 ```bash
 make mac-run
 ```
 
-Build the `.app` bundle and open it:
+打包并打开：
 
 ```bash
 make mac-build
 make mac-open
 ```
 
-The resulting application is created at `dist/WhatsAppClient.app`. The bundle
-is built for the architecture of the Python interpreter used by `.venv`
-(`arm64` on Apple Silicon or `x86_64` on Intel Macs).
+生成文件：
 
-The underlying scripts can also be run without `make`:
+```text
+dist/WhatsAppClient.app
+```
+
+也可以直接运行脚本：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+bash scripts/setup_mac.sh
 bash scripts/start_mac.sh
 bash scripts/build_mac.sh
 open dist/WhatsAppClient.app
 ```
 
-The application is unsigned. On first launch, if Gatekeeper blocks it, use
-Finder's **Open** context-menu action. For distribution to other users, sign
-and notarize the application with an Apple Developer ID.
+构建架构跟随 `.venv` 使用的 Python：Apple Silicon 为 `arm64`，Intel Mac 为 `x86_64`。当前应用未使用 Developer ID 签名和公证；首次运行若被 Gatekeeper 阻止，可在 Finder 中右键应用并选择“打开”。正式分发时应完成签名和公证。
 
-## Using the AppImage
+## Linux AppImage
 
-1. Make it executable:
-   ```bash
-   chmod +x WhatsAppClient-x86_64.AppImage
-   ```
-2. Run it:
-   ```bash
-   ./WhatsAppClient-x86_64.AppImage
-   ```
+构建：
 
-If you hit a FUSE error, run:
+```bash
+bash scripts/build_appimage.sh
+```
+
+运行：
+
+```bash
+chmod +x WhatsAppClient-x86_64.AppImage
+./WhatsAppClient-x86_64.AppImage
+```
+
+遇到 FUSE 问题时：
 
 ```bash
 ./WhatsAppClient-x86_64.AppImage --appimage-extract-and-run
 ```
 
-## Desktop Entry (Linux)
+## 项目结构
 
-Copy the AppImage, icon, and desktop file to standard per-user locations.
-Replace `USER` in `whatsapp.desktop` with your actual username (or edit paths).
-
-```bash
-mkdir -p ~/Apps ~/.local/share/icons/hicolor/256x256/apps ~/.local/share/applications
-cp WhatsAppClient-x86_64.AppImage ~/Apps/
-cp whatsapp_icon.png ~/.local/share/icons/hicolor/256x256/apps/whatsapp.png
-cp whatsapp.desktop ~/.local/share/applications/
-chmod +x ~/Apps/WhatsAppClient-x86_64.AppImage
+```text
+main.py                    应用入口、Chromium 参数和 Windows 工作进程入口
+app/window.py              主界面、账号列表、当前账号操作和页面切换
+app/account.py             WebEngine Profile、WhatsApp 页面、通知和号码识别
+app/proxy_extension.py     代理解析、检测、本地网关和上游隧道
+app/country.py             真实代理出口国家检测
+app/config.py              路径、配置读取和原子持久化
+app/windows_account.py     Windows 独立账号进程及嵌入逻辑
+scripts/setup_mac.sh       macOS 虚拟环境安装
+scripts/start_mac.sh       macOS 源码启动
+scripts/build_mac.sh       macOS .app 打包
 ```

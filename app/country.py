@@ -1,54 +1,51 @@
-import ipaddress
 import json
-import socket
+from http.client import HTTPResponse
+import ssl
 import threading
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
+
+from app.proxy_extension import open_proxy_tunnel
 
 
 class CountryResolver(QObject):
     resolved = pyqtSignal(str, str, str)
 
-    def lookup(self, account_id, host):
+    def lookup(self, account_id, proxy_url):
         threading.Thread(
             target=self._resolve,
-            args=(account_id, host),
+            args=(account_id, proxy_url),
             daemon=True,
         ).start()
 
-    def _resolve(self, account_id, host):
+    def _resolve(self, account_id, proxy_url):
         try:
-            ip = self._resolve_ip(host)
-            parsed = ipaddress.ip_address(ip)
-            if parsed.is_private or parsed.is_loopback:
-                self.resolved.emit(account_id, "LAN", "本地网络")
-                return
-
-            request = Request(
-                f"https://ipwho.is/{quote(ip, safe=':')}",
-                headers={"User-Agent": "WhatsAppClient/1.0"},
-            )
-            with urlopen(request, timeout=5) as response:
+            connection = open_proxy_tunnel(proxy_url, "ipwho.is", 443)
+            try:
+                context = ssl.create_default_context()
+                tls = context.wrap_socket(connection, server_hostname="ipwho.is")
+                tls.sendall(
+                    b"GET / HTTP/1.1\r\n"
+                    b"Host: ipwho.is\r\n"
+                    b"User-Agent: WhatsAppClient/1.0\r\n"
+                    b"Accept: application/json\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                response = HTTPResponse(tls)
+                response.begin()
+                if response.status != 200:
+                    raise OSError(f"IP 查询返回 HTTP {response.status}")
                 data = json.loads(response.read().decode("utf-8"))
+                tls.close()
+            finally:
+                connection.close()
             if not data.get("success", True):
                 raise ValueError(data.get("message", "lookup failed"))
             code = str(data.get("country_code") or "").upper()
             country = str(data.get("country") or code or "未知")
             self.resolved.emit(account_id, code or "--", country)
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError, ssl.SSLError, json.JSONDecodeError):
             self.resolved.emit(account_id, "--", "国家未知")
-
-    @staticmethod
-    def _resolve_ip(host):
-        try:
-            return str(ipaddress.ip_address(host))
-        except ValueError:
-            results = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-            if not results:
-                raise OSError("DNS lookup failed")
-            return results[0][4][0]
 
 
 def country_flag(code):

@@ -5,7 +5,7 @@ import datetime
 import platform
 
 # Chromium 参数必须在导入 Qt WebEngine 前设置。macOS 不需要 Linux 的 GPU 沙盒参数。
-chromium_flags = ["--enable-logging", "--log-level=1"]
+chromium_flags = ["--enable-logging", "--log-level=1", "--disable-quic"]
 if platform.system() == "Linux":
     chromium_flags.append("--disable-gpu-sandbox")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join(chromium_flags))
@@ -15,8 +15,9 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt
 
-from app.config import get_base_storage_dir, get_icon_path, load_accounts, load_settings
+from app.config import get_base_storage_dir, get_icon_path
 
 # 获取当前运行目录
 os.makedirs(get_base_storage_dir(), exist_ok=True)
@@ -53,48 +54,29 @@ if __name__ == "__main__":
         app.setWindowIcon(QIcon(icon_path))
     
     try:
-        if "--account-worker" in sys.argv:
+        if "--windows-account-worker" in sys.argv:
             from PyQt6.QtWidgets import QMainWindow
             from app.account import WhatsAppAccount
-            from app.process_account import WorkerCommandBridge
+            from app.config import load_accounts, load_settings
             from app.proxy_extension import apply_proxy_mode
-
-            position = sys.argv.index("--account-worker")
-            profile_name = sys.argv[position + 1]
-            account_config = next(
-                (item for item in load_accounts() if item.get("profile_name") == profile_name),
-                None,
-            )
-            if account_config is None:
-                raise ValueError(f"账号配置不存在: {profile_name}")
-            proxy_mode = str(account_config.get("proxy_mode") or "none")
-            custom_proxy = str(account_config.get("proxy_url") or "")
-            global_proxy = str(load_settings().get("global_proxy_url") or "")
-            effective_proxy = global_proxy if proxy_mode == "global" else (
-                custom_proxy if proxy_mode == "custom" else ""
-            )
-            apply_proxy_mode(proxy_mode, effective_proxy)
-
+            from app.windows_account import WindowsWorkerState
+            profile = sys.argv[sys.argv.index("--windows-account-worker") + 1]
+            config = next(item for item in load_accounts() if item.get("profile_name") == profile)
+            mode = str(config.get("proxy_mode") or "none")
+            custom = str(config.get("proxy_url") or "")
+            proxy = str(load_settings().get("global_proxy_url") or "") if mode == "global" else (custom if mode == "custom" else "")
+            apply_proxy_mode(mode, proxy)
             window = QMainWindow()
-            label = str(account_config.get("phone") or account_config.get("label") or "WhatsApp")
-            window.setWindowTitle(f"WhatsApp - {label}")
-            window.resize(1200, 900)
-            account = WhatsAppAccount(profile_name, proxy_url=effective_proxy)
-            account.proxy_mode = proxy_mode
-            account.phone_number = str(account_config.get("phone") or "")
+            window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            account = WhatsAppAccount(profile, proxy_url=proxy)
             window.setCentralWidget(account)
-            bridge = WorkerCommandBridge(profile_name, window, account)
-            window._worker_bridge = bridge
-            window.show()
-            if "--hidden" in sys.argv:
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(100, window.hide)
+            window.resize(1200, 900); window.show()
+            window._state = WindowsWorkerState(profile, window, account)
             account.request_load()
-        else:
-            # 主进程只管理账号；WebEngine 页面分别运行在独立子进程中。
-            from app.window import MainWindow
-            window = MainWindow()
-            window.show()
+            sys.exit(app.exec())
+        from app.window import MainWindow
+        window = MainWindow()
+        window.show()
         sys.exit(app.exec())
     except Exception as e:
         global_exception_handler(type(e), e, e.__traceback__)

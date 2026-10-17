@@ -37,15 +37,16 @@ from app.config import (
     load_accounts as load_account_configs,
     save_accounts as save_account_configs,
 )
-from app.process_account import AccountProcessPanel
+from app.account import WhatsAppAccount
+from app.windows_account import WindowsAccountProcess
 from app.country import CountryResolver, country_flag
-from app.proxy_extension import parse_proxy_url
+from app.proxy_extension import apply_proxy_mode, parse_proxy_url
 from app.updater import UpdateChecker, start_update_check
 
 
 class AddAccountDialog(QDialog):
-    """自定义添加账号对话框，支持直接粘贴代理链接"""
-    def __init__(self, global_proxy="", parent=None, name="", proxy_mode="none", proxy_url=""):
+    """自定义添加账号对话框，支持直接粘贴代理链接。"""
+    def __init__(self, global_proxy="", parent=None, name="", proxy_mode="custom", proxy_url=""):
         super().__init__(parent)
         self.setWindowTitle("编辑账号" if name else "添加账号")
         self.resize(350, 180)
@@ -54,10 +55,10 @@ class AddAccountDialog(QDialog):
 
         self.proxy_mode = QComboBox()
         self.proxy_mode.addItem("无代理（直接连接）", "none")
-        self.proxy_mode.addItem("使用系统代理", "system")
+        self.proxy_mode.addItem("使用系统代理 / VPN", "system")
         global_label = "使用全局代理" if global_proxy else "使用全局代理（未配置）"
         self.proxy_mode.addItem(global_label, "global")
-        self.proxy_mode.addItem("自定义代理", "custom")
+        self.proxy_mode.addItem("自定义代理（账号独立）", "custom")
         selected_index = self.proxy_mode.findData(proxy_mode)
         if selected_index >= 0:
             self.proxy_mode.setCurrentIndex(selected_index)
@@ -167,12 +168,22 @@ class MainWindow(QMainWindow):
         effective_proxy = self.global_proxy_url if proxy_mode == "global" else (
             proxy_url or "" if proxy_mode == "custom" else ""
         )
-        account = AccountProcessPanel(profile_name, self)
+        account_class = WindowsAccountProcess if platform.system() == "Windows" else WhatsAppAccount
+        account = account_class(profile_name, proxy_url=effective_proxy)
         account.proxy_mode = proxy_mode
-        account.proxy_url = effective_proxy
         account.custom_proxy_url = proxy_url or ""
         account.phone_number = str(phone or "")
-        account.state_changed.connect(self._on_process_state)
+        account.unread_count_changed.connect(
+            lambda count, profile=profile_name: self._on_unread_count(profile, count)
+        )
+        account.browser_notification.connect(
+            lambda title, message, profile=profile_name: self._on_browser_notification(
+                profile, title, message
+            )
+        )
+        account.phone_number_changed.connect(
+            lambda number, profile=profile_name: self._on_phone_number(profile, number)
+        )
         self.pages.addWidget(account)
         item = QListWidgetItem(label)
         item.setData(self.LABEL_ROLE, label)
@@ -185,8 +196,6 @@ class MainWindow(QMainWindow):
         item.setSizeHint(QSize(0, 58))
         self.account_list.addItem(item)
         self._set_account_location_pending(item, effective_proxy, proxy_mode)
-        # 延迟到账号清单落盘后再启动，确保工作进程能读取新账号配置。
-        QTimer.singleShot(300, lambda panel=account: panel.start(hidden=True))
         self._update_empty_state()
         return self.account_list.count() - 1
 
@@ -194,23 +203,7 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= self.account_list.count():
             return None
         widget = self.pages.widget(index + 1)
-        return widget if isinstance(widget, AccountProcessPanel) else None
-
-    def _on_process_state(self, profile_name, state):
-        phone = str(state.get("phone") or "")
-        if phone:
-            account = next(
-                (self._account_at(i) for i in range(self.account_list.count())
-                 if str(self.account_list.item(i).data(self.PROFILE_ROLE) or "") == profile_name),
-                None,
-            )
-            if account is not None:
-                account.phone_number = phone
-            self._on_phone_number(profile_name, phone)
-        self._on_unread_count(profile_name, int(state.get("unread") or 0))
-        notification = str(state.get("notification") or "")
-        if notification:
-            self._on_browser_notification(profile_name, "WhatsApp", notification)
+        return widget if isinstance(widget, (WhatsAppAccount, WindowsAccountProcess)) else None
 
     def _account_label(self, index):
         item = self.account_list.item(index)
@@ -244,7 +237,7 @@ class MainWindow(QMainWindow):
         item.setData(self.STATUS_ROLE, f"{mode_label} · 检测国家…")
         self._render_account_item(item)
         item.setToolTip(f"{label}\n{mode_label}: {config.host}:{config.port}")
-        self.country_resolver.lookup(request_id, config.host)
+        self.country_resolver.lookup(request_id, proxy_url)
 
     def _on_country_resolved(self, request_id, code, country):
         for index in range(self.account_list.count()):
@@ -341,23 +334,22 @@ class MainWindow(QMainWindow):
     def _edit_account(self, index):
         self._edit_accounts([index])
 
-    def _selected_account_indices(self):
-        return sorted({self.account_list.row(item) for item in self.account_list.selectedItems()})
-
-    def _open_selected_accounts(self):
-        indices = self._selected_account_indices()
-        if not indices and self.account_list.currentRow() >= 0:
-            indices = [self.account_list.currentRow()]
-        for index in indices:
-            account = self._account_at(index)
-            if account is not None:
-                account.show_account()
+    def _on_account_current_changed(self, index):
+        if index < 0:
+            return
+        item = self.account_list.item(index)
+        if item is not None:
+            self.settings["selected_profile"] = str(item.data(self.PROFILE_ROLE) or "")
+            try:
+                save_settings(self.settings)
+            except OSError as exc:
+                print(f"保存当前账号失败: {exc}")
+        if index != self._active_index:
+            self._on_tab_changed(index)
 
     def _edit_selected_accounts(self):
-        indices = self._selected_account_indices()
-        if not indices and self.account_list.currentRow() >= 0:
-            indices = [self.account_list.currentRow()]
-        self._edit_accounts(indices)
+        index = self.account_list.currentRow()
+        self._edit_accounts([index] if index >= 0 else [])
 
     def _edit_accounts(self, indices):
         indices = [index for index in indices if self._account_at(index) is not None]
@@ -403,37 +395,40 @@ class MainWindow(QMainWindow):
             account.proxy_mode = data["proxy_mode"]
             account.custom_proxy_url = data["proxy_url"] if data["proxy_mode"] == "custom" else ""
             account.proxy_url = effective_proxy
+            account.proxy_config = parse_proxy_url(effective_proxy)
             self._set_account_location_pending(item, effective_proxy, data["proxy_mode"])
             accounts.append(account)
         self._save_accounts()
-        for account in accounts:
-            account.restart()
+        if platform.system() == "Windows":
+            for account in accounts:
+                account.restart()
+            return
+        current = self.account_list.currentRow()
+        if current in indices and current == self._active_index:
+            self._reload_embedded_account(current)
 
     def _delete_selected_accounts(self):
-        indices = self._selected_account_indices()
-        if not indices and self.account_list.currentRow() >= 0:
-            indices = [self.account_list.currentRow()]
-        if not indices:
+        index = self.account_list.currentRow()
+        if index < 0:
             return
         answer = QMessageBox.question(
             self,
             "删除账号",
-            f"确定删除选中的 {len(indices)} 个账号吗？\n登录数据目录会保留。",
+            f"确定删除账号“{self._account_label(index)}”吗？\n登录数据目录会保留。",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        for index in sorted(indices, reverse=True):
-            self._close_tab(index)
+        self._close_tab(index)
 
     def _save_accounts(self):
         """把当前所有打开的标签页账号信息保存到 JSON"""
         accounts = []
         for i in range(self.account_list.count()):
             widget = self._account_at(i)
-            if isinstance(widget, AccountProcessPanel):
+            if isinstance(widget, (WhatsAppAccount, WindowsAccountProcess)):
                 accounts.append({
                     "label": self._account_label(i),
-                    "profile_name": widget.profile_name,
+                    "profile_name": widget.profile.storageName(),
                     "proxy_mode": getattr(widget, "proxy_mode", "global"),
                     "proxy_url": getattr(widget, "custom_proxy_url", ""),
                     "phone": getattr(widget, "phone_number", ""),
@@ -507,8 +502,6 @@ class MainWindow(QMainWindow):
         if widget is None:
             return
 
-        widget.terminate()
-
         self.account_list.takeItem(index)
         self.pages.removeWidget(widget)
 
@@ -540,7 +533,7 @@ class MainWindow(QMainWindow):
 
         for i in range(self.account_list.count()):
             widget = self._account_at(i)
-            if not isinstance(widget, AccountProcessPanel):
+            if not isinstance(widget, (WhatsAppAccount, WindowsAccountProcess)):
                 continue
             timer = QTimer(self)
             timer.setSingleShot(True)
@@ -550,7 +543,7 @@ class MainWindow(QMainWindow):
         current_row = self.account_list.currentRow()
         self._schedule_inactive_unload(current_row)
         if current_row >= 0:
-            self._on_tab_changed(current_row)
+            self._on_account_current_changed(current_row)
 
     # ---------- 顶部栏与样式 ----------
 
@@ -607,16 +600,21 @@ class MainWindow(QMainWindow):
             account = self._account_at(row)
             if account is not None:
                 account.proxy_url = proxy_url
-                account.restart()
+                account.proxy_config = parse_proxy_url(proxy_url)
+                if isinstance(account, WindowsAccountProcess):
+                    account.restart()
             self._set_account_location_pending(item, proxy_url, "global")
 
         message = "全局代理已保存。"
         current_row = self.account_list.currentRow()
         current_item = self.account_list.item(current_row)
-        if current_item is not None and current_item.data(self.PROXY_MODE_ROLE) == "global":
+        if (current_item is not None
+                and current_item.data(self.PROXY_MODE_ROLE) == "global"
+                and current_row == self._active_index
+                and platform.system() != "Windows"):
             account = self._account_at(current_row)
             if account is not None:
-                account.show_account()
+                self._reload_embedded_account(current_row)
             message += "\n当前账号已重新连接。"
         QMessageBox.information(self, "全局代理", message)
 
@@ -641,17 +639,18 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(title)
         toolbar_layout.addStretch()
 
-        open_btn = QPushButton("打开选中", self._toolbar)
-        open_btn.setObjectName("toolbar_action")
-        open_btn.clicked.connect(self._open_selected_accounts)
-        toolbar_layout.addWidget(open_btn)
+        refresh_btn = QPushButton("刷新当前", self._toolbar)
+        refresh_btn.setObjectName("toolbar_action")
+        refresh_btn.setToolTip("重新连接代理并完整加载当前 WhatsApp 页面")
+        refresh_btn.clicked.connect(self._refresh_current_account)
+        toolbar_layout.addWidget(refresh_btn)
 
         edit_btn = QPushButton("修改代理", self._toolbar)
         edit_btn.setObjectName("toolbar_action")
         edit_btn.clicked.connect(self._edit_selected_accounts)
         toolbar_layout.addWidget(edit_btn)
 
-        delete_btn = QPushButton("删除选中", self._toolbar)
+        delete_btn = QPushButton("删除账号", self._toolbar)
         delete_btn.setObjectName("toolbar_danger")
         delete_btn.clicked.connect(self._delete_selected_accounts)
         toolbar_layout.addWidget(delete_btn)
@@ -706,11 +705,9 @@ class MainWindow(QMainWindow):
 
         self.account_list = QListWidget(sidebar)
         self.account_list.setObjectName("account_list")
-        self.account_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.account_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.account_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.account_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.account_list.customContextMenuRequested.connect(self._show_tab_context_menu)
-        self.account_list.currentRowChanged.connect(self._on_tab_changed)
+        self.account_list.currentRowChanged.connect(self._on_account_current_changed)
         sidebar_layout.addWidget(self.account_list, 1)
 
         body_layout.addWidget(sidebar)
@@ -851,11 +848,11 @@ class MainWindow(QMainWindow):
         account = self._current_account()
         if not account:
             return
-        QMessageBox.information(
-            self,
-            "独立账号进程",
-            "为避免破坏 WhatsApp 登录状态，独立进程模式不在运行中清除账号数据。",
-        )
+        if isinstance(account, WindowsAccountProcess):
+            QMessageBox.information(self, "缓存", "请先删除账号后再手动清理其数据目录。")
+            return
+        account.page().profile().clearHttpCache()
+        QMessageBox.information(self, "缓存已清除", "当前账号的网页缓存已清除，登录数据已保留。")
 
     def _open_downloads(self):
         downloads_path = os.path.expanduser("~/Downloads/WhatsApp")
@@ -873,12 +870,20 @@ class MainWindow(QMainWindow):
         previous_index = self._active_index
         if previous_index >= 0 and previous_index != index:
             previous = self._account_at(previous_index)
-            if previous is not None:
-                previous.hide_account()
+            if previous is not None and not isinstance(previous, WindowsAccountProcess):
+                previous.cancel_pending_load()
+                previous.stop()
+                previous.setUrl(QUrl("about:blank"))
 
         widget = self._account_at(index)
         if widget is None:
             return
+        if not isinstance(widget, WindowsAccountProcess):
+            try:
+                apply_proxy_mode(getattr(widget, "proxy_mode", "none"), widget.proxy_url)
+            except ValueError as exc:
+                QMessageBox.warning(self, "代理地址无效", str(exc))
+                return
         self._active_index = index
         self.pages.setCurrentIndex(index + 1)
         item = self.account_list.item(index)
@@ -888,7 +893,28 @@ class MainWindow(QMainWindow):
                 save_settings(self.settings)
             except OSError as exc:
                 print(f"保存当前账号失败: {exc}")
-        widget.show_account()
+        widget.request_load()
+
+    def _reload_embedded_account(self, index):
+        account = self._account_at(index)
+        if account is None:
+            return
+        if isinstance(account, WindowsAccountProcess):
+            account.restart()
+            return
+        account.cancel_pending_load()
+        account.stop()
+        account.setUrl(QUrl("about:blank"))
+        self._active_index = -1
+        self._on_tab_changed(index)
+
+    def _refresh_current_account(self):
+        """完整重建当前账号的网络连接并刷新页面。"""
+        index = self.account_list.currentRow()
+        if index < 0:
+            QMessageBox.information(self, "刷新", "请先选择一个账号。")
+            return
+        self._reload_embedded_account(index)
 
     def _schedule_inactive_unload(self, active_index):
         return
@@ -905,10 +931,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """退出前保存账号清单、代理选择和当前账号。"""
         self._save_accounts()
-        for index in range(self.account_list.count()):
-            account = self._account_at(index)
-            if account is not None:
-                account.terminate()
+        if platform.system() == "Windows":
+            for index in range(self.account_list.count()):
+                account = self._account_at(index)
+                if isinstance(account, WindowsAccountProcess):
+                    account.terminate()
         current = self.account_list.currentItem()
         if current is not None:
             self.settings["selected_profile"] = str(

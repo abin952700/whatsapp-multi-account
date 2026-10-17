@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 import base64
+import select
 import socket
+import socketserver
 import ssl
+import threading
 from urllib.parse import unquote, urlsplit
 
 from PyQt6.QtCore import QUrl
@@ -15,6 +18,10 @@ class ProxyConfig:
     port: int
     username: str = ""
     password: str = ""
+
+
+_gateway_lock = threading.Lock()
+_gateway = None
 
 
 def parse_proxy_url(value):
@@ -48,22 +55,19 @@ def parse_proxy_url(value):
 
 
 def apply_application_proxy(value):
-    """使用 Qt 官方代理通道配置 Chromium 网络栈。"""
+    """让 Chromium 连接本地网关，由网关使用账号自己的上游代理。"""
     config = parse_proxy_url(value)
     if config is None:
+        _stop_gateway()
         QNetworkProxy.setApplicationProxy(
             QNetworkProxy(QNetworkProxy.ProxyType.NoProxy)
         )
         return None
 
-    proxy_type = (
-        QNetworkProxy.ProxyType.Socks5Proxy
-        if config.scheme == "socks5"
-        else QNetworkProxy.ProxyType.HttpProxy
+    gateway = _start_gateway(config)
+    proxy = QNetworkProxy(
+        QNetworkProxy.ProxyType.HttpProxy, "127.0.0.1", gateway.server_address[1]
     )
-    proxy = QNetworkProxy(proxy_type, config.host, config.port)
-    proxy.setUser(config.username)
-    proxy.setPassword(config.password)
     QNetworkProxy.setApplicationProxy(proxy)
     return config
 
@@ -71,6 +75,7 @@ def apply_application_proxy(value):
 def apply_proxy_mode(mode, value=None):
     """按账号配置应用直连、系统代理或指定代理。"""
     if mode == "system":
+        _stop_gateway()
         QNetworkProxyFactory.setUseSystemConfiguration(True)
         proxies = QNetworkProxyFactory.systemProxyForQuery(
             QNetworkProxyQuery(QUrl("https://web.whatsapp.com"))
@@ -83,6 +88,222 @@ def apply_proxy_mode(mode, value=None):
     if mode == "none":
         return apply_application_proxy(None)
     return apply_application_proxy(value)
+
+
+class _ThreadingProxyServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, address, upstream):
+        self.upstream = upstream
+        self.connections = set()
+        self.connections_lock = threading.Lock()
+        super().__init__(address, _LocalProxyHandler)
+
+    def track(self, connection):
+        with self.connections_lock:
+            self.connections.add(connection)
+
+    def untrack(self, connection):
+        with self.connections_lock:
+            self.connections.discard(connection)
+
+    def close_connections(self):
+        with self.connections_lock:
+            connections = list(self.connections)
+            self.connections.clear()
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+
+class _LocalProxyHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        upstream = None
+        self.server.track(self.request)
+        try:
+            header = _recv_headers(self.request)
+            first_line = header.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            parts = first_line.split(" ", 2)
+            if len(parts) != 3 or parts[0].upper() != "CONNECT":
+                self.request.sendall(
+                    b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n"
+                )
+                return
+            host, port = _split_connect_target(parts[1])
+            upstream = _open_upstream_tunnel(self.server.upstream, host, port)
+            self.server.track(upstream)
+            self.request.sendall(
+                b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: WhatsAppClient\r\n\r\n"
+            )
+            _relay(self.request, upstream)
+        except (OSError, ValueError):
+            try:
+                self.request.sendall(
+                    b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"
+                )
+            except OSError:
+                pass
+        finally:
+            self.server.untrack(self.request)
+            if upstream is not None:
+                self.server.untrack(upstream)
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+
+
+def _start_gateway(config):
+    global _gateway
+    with _gateway_lock:
+        if _gateway is not None:
+            _stop_gateway_locked()
+        server = _ThreadingProxyServer(("127.0.0.1", 0), config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        server._thread = thread
+        _gateway = server
+        return server
+
+
+def _stop_gateway():
+    with _gateway_lock:
+        _stop_gateway_locked()
+
+
+def _stop_gateway_locked():
+    global _gateway
+    if _gateway is None:
+        return
+    server = _gateway
+    _gateway = None
+    server.close_connections()
+    server.shutdown()
+    server.server_close()
+
+
+def _recv_headers(connection, limit=65536):
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        chunk = connection.recv(4096)
+        if not chunk:
+            raise OSError("连接提前关闭")
+        data.extend(chunk)
+        if len(data) > limit:
+            raise OSError("代理请求头过大")
+    return bytes(data)
+
+
+def _split_connect_target(target):
+    parsed = urlsplit("//" + target)
+    if not parsed.hostname:
+        raise ValueError("CONNECT 目标无效")
+    return parsed.hostname, parsed.port or 443
+
+
+def _resolved_target(host, port):
+    addresses = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    if not addresses:
+        raise OSError(f"无法解析 {host}")
+    return addresses[0][4][0], port
+
+
+def _open_upstream_tunnel(config, host, port):
+    target_ip, target_port = _resolved_target(host, port)
+    connection = socket.create_connection((config.host, config.port), timeout=15)
+    connection.settimeout(30)
+    try:
+        if config.scheme == "https":
+            context = ssl.create_default_context()
+            connection = context.wrap_socket(connection, server_hostname=config.host)
+        if config.scheme == "socks5":
+            _socks5_connect(connection, config, target_ip, target_port)
+        else:
+            _http_connect(connection, config, target_ip, target_port, host)
+        connection.settimeout(None)
+        return connection
+    except Exception:
+        connection.close()
+        raise
+
+
+def open_proxy_tunnel(value, host, port=443):
+    """通过指定账号代理建立 TCP 隧道，供出口 IP/国家检测复用。"""
+    config = parse_proxy_url(value)
+    if config is None:
+        raise ValueError("代理地址为空")
+    return _open_upstream_tunnel(config, host, port)
+
+
+def _socks5_connect(connection, config, target_ip, target_port):
+    methods = b"\x00\x02" if config.username else b"\x00"
+    connection.sendall(bytes((5, len(methods))) + methods)
+    version, method = _recv_exact(connection, 2)
+    if version != 5 or method == 0xFF:
+        raise OSError("SOCKS5 认证方式被拒绝")
+    if method == 2:
+        username = config.username.encode("utf-8")
+        password = config.password.encode("utf-8")
+        if len(username) > 255 or len(password) > 255:
+            raise ValueError("SOCKS5 用户名或密码过长")
+        connection.sendall(
+            bytes((1, len(username))) + username + bytes((len(password),)) + password
+        )
+        if _recv_exact(connection, 2) != b"\x01\x00":
+            raise OSError("SOCKS5 用户名或密码错误")
+    connection.sendall(
+        b"\x05\x01\x00\x01" + socket.inet_aton(target_ip) + target_port.to_bytes(2, "big")
+    )
+    version, status, _reserved, address_type = _recv_exact(connection, 4)
+    if version != 5 or status != 0:
+        raise OSError(f"SOCKS5 上游拒绝连接：0x{status:02x}")
+    address_size = {1: 4, 4: 16}.get(address_type)
+    if address_type == 3:
+        address_size = _recv_exact(connection, 1)[0]
+    if address_size is None:
+        raise OSError("SOCKS5 返回地址无效")
+    _recv_exact(connection, address_size + 2)
+
+
+def _http_connect(connection, config, target_ip, target_port, original_host):
+    headers = [
+        f"CONNECT {target_ip}:{target_port} HTTP/1.1",
+        f"Host: {original_host}:{target_port}",
+        "Proxy-Connection: Keep-Alive",
+    ]
+    if config.username:
+        credentials = base64.b64encode(
+            f"{config.username}:{config.password}".encode("utf-8")
+        ).decode("ascii")
+        headers.append(f"Proxy-Authorization: Basic {credentials}")
+    connection.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("latin-1"))
+    response = _recv_headers(connection)
+    status_line = response.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or parts[1] != "200":
+        raise OSError(f"HTTP 上游拒绝连接：{status_line}")
+
+
+def _relay(left, right):
+    sockets = (left, right)
+    while True:
+        readable, _, exceptional = select.select(sockets, (), sockets, 60)
+        if exceptional:
+            return
+        if not readable:
+            continue
+        for source in readable:
+            data = source.recv(65536)
+            if not data:
+                return
+            (right if source is left else left).sendall(data)
 
 
 def test_proxy_connection(value, target_host="web.whatsapp.com", target_port=443, timeout=10):
@@ -138,8 +359,15 @@ def _test_socks5(connection, config, target_host, target_port):
         if auth_version != 1 or status != 0:
             return False, "SOCKS5 用户名或密码错误"
 
-    host = target_host.encode("idna")
-    connection.sendall(b"\x05\x01\x00\x03" + bytes((len(host),)) + host + target_port.to_bytes(2, "big"))
+    try:
+        target_ip = socket.gethostbyname(target_host)
+    except socket.gaierror:
+        return False, f"本机无法解析 {target_host}"
+    connection.sendall(
+        b"\x05\x01\x00\x01"
+        + socket.inet_aton(target_ip)
+        + target_port.to_bytes(2, "big")
+    )
     version, status, _reserved, address_type = _recv_exact(connection, 4)
     if version != 5 or status != 0:
         known = {
