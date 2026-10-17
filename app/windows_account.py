@@ -180,6 +180,9 @@ class WindowsAccountProcess(QWidget):
             # 页面占据上方主体区域，加载状态与进度条固定显示在下方。
             self.layout.insertWidget(0, self._container, 1)
             self._container.show()
+            # 必须在 createWindowContainer 完成接管后再修改任务栏样式；
+            # 提前设置 TOOLWINDOW 会让 Qt 把它识别为不可嵌入的工具窗口。
+            QTimer.singleShot(250, lambda value=hwnd: remove_window_from_taskbar(value))
         status = str(state.get("load_status") or "正在启动账号进程…")
         progress = max(0, min(100, int(state.get("load_progress") or 0)))
         loaded = bool(state.get("loaded"))
