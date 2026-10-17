@@ -14,29 +14,55 @@ from app.config import get_base_storage_dir, get_instance_name
 
 
 def remove_window_from_taskbar(hwnd):
-    """隐藏账号工作窗口的任务栏入口，不改变父窗口或渲染位置。"""
+    """通过 ITaskbarList 删除任务栏按钮，不修改窗口样式或父子关系。"""
     if sys.platform != "win32" or not hwnd:
         return
-    user32 = ctypes.windll.user32
-    hwnd_type = wintypes.HWND
-    user32.GetWindowLongPtrW.argtypes = [hwnd_type, ctypes.c_int]
-    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
-    user32.SetWindowLongPtrW.argtypes = [hwnd_type, ctypes.c_int, ctypes.c_ssize_t]
-    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
-    user32.SetWindowPos.argtypes = [
-        hwnd_type, hwnd_type, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        ctypes.c_int, wintypes.UINT,
-    ]
-    user32.SetWindowPos.restype = wintypes.BOOL
 
-    gwl_exstyle = -20
-    ws_ex_appwindow = 0x00040000
-    ws_ex_toolwindow = 0x00000080
-    swp_flags = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020
-    style = int(user32.GetWindowLongPtrW(hwnd, gwl_exstyle))
-    style = (style & ~ws_ex_appwindow) | ws_ex_toolwindow
-    user32.SetWindowLongPtrW(hwnd, gwl_exstyle, style)
-    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, swp_flags)
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+        @classmethod
+        def from_text(cls, value):
+            raw = uuid.UUID(value).bytes_le
+            return cls.from_buffer_copy(raw)
+
+    ole32 = ctypes.OleDLL("ole32")
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    initialize_result = ole32.CoInitializeEx(None, 2)
+    clsid = GUID.from_text("56FDF344-FD6D-11D0-958A-006097C9A090")
+    iid = GUID.from_text("56FDF342-FD6D-11D0-958A-006097C9A090")
+    instance = ctypes.c_void_p()
+    ole32.CoCreateInstance.argtypes = [
+        ctypes.POINTER(GUID), ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+    ]
+    ole32.CoCreateInstance.restype = ctypes.c_long
+    if ole32.CoCreateInstance(
+        ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(instance)
+    ) < 0:
+        if initialize_result in (0, 1):
+            ole32.CoUninitialize()
+        return
+    vtable = ctypes.cast(
+        instance, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+    ).contents
+    method = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+    hwnd_method = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.c_void_p, wintypes.HWND
+    )
+    try:
+        method(vtable[3])(instance)  # ITaskbarList::HrInit
+        hwnd_method(vtable[5])(instance, int(hwnd))  # ITaskbarList::DeleteTab
+    finally:
+        method(vtable[2])(instance)  # IUnknown::Release
+        if initialize_result in (0, 1):
+            ole32.CoUninitialize()
 
 
 def ipc_path(profile, name):
@@ -180,8 +206,8 @@ class WindowsAccountProcess(QWidget):
             # 页面占据上方主体区域，加载状态与进度条固定显示在下方。
             self.layout.insertWidget(0, self._container, 1)
             self._container.show()
-            # 必须在 createWindowContainer 完成接管后再修改任务栏样式；
-            # 提前设置 TOOLWINDOW 会让 Qt 把它识别为不可嵌入的工具窗口。
+            # 只删除任务栏按钮，不修改窗口样式；修改 TOOLWINDOW 会破坏
+            # QWindow.fromWinId/createWindowContainer 的跨进程嵌入。
             QTimer.singleShot(250, lambda value=hwnd: remove_window_from_taskbar(value))
         status = str(state.get("load_status") or "正在启动账号进程…")
         progress = max(0, min(100, int(state.get("load_progress") or 0)))
