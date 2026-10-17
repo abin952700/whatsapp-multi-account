@@ -24,3 +24,8 @@ def get_icon_path():
     """项目根目录下的图标路径。"""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "whatsapp_icon.png")
+
+
+def get_config_file_path():
+    """获取账号配置文件的路径"""
+    return os.path.join(get_base_storage_dir(), "accounts.json")

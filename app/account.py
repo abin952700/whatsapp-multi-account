@@ -5,7 +5,7 @@ from PyQt6.QtCore import QUrl, pyqtSignal
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 from PyQt6.QtGui import QIcon, QDesktopServices
-from PyQt6.QtNetwork import QNetworkProxy, QAuthenticator
+from PyQt6.QtNetwork import QNetworkProxy
 
 from app.config import WHATSAPP_WEB_URL, get_base_storage_dir, get_icon_path
 
@@ -84,6 +84,17 @@ class WhatsAppAccount(QWebEngineView):
     def __init__(self, profile_name, proxy_url=None):
         super().__init__()
 
+        # 保存代理信息，供持久化 JSON 使用
+        self.proxy_url = proxy_url
+
+        # 1. 在创建 Profile 之前，先设置全局代理
+        if proxy_url:
+            self._apply_global_proxy(proxy_url)
+        else:
+            # 如果不需要代理，清理可能残留的全局代理
+            QNetworkProxy.setApplicationProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
+
+        # 2. 配置存储路径
         storage_path = os.path.join(get_base_storage_dir(), profile_name)
         os.makedirs(storage_path, exist_ok=True)
 
@@ -91,7 +102,7 @@ class WhatsAppAccount(QWebEngineView):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # 1. 创建并配置 Profile
+        # 3. 创建并配置 Profile
         self.profile = QWebEngineProfile(profile_name, self)
         self.profile.setPersistentStoragePath(storage_path)
         self.profile.setPersistentCookiesPolicy(
@@ -102,24 +113,19 @@ class WhatsAppAccount(QWebEngineView):
         self.profile.downloadRequested.connect(self._on_download_requested)
         self.profile.setHttpUserAgent(build_user_agent())
 
-        # 2. 配置代理
-        if proxy_url:
-            self._setup_proxy(proxy_url)
-
-        # 3. 创建 Page
+        # 4. 创建 Page
         page = WhatsAppWebPage(self.profile, self)
         page.external_url_requested.connect(self._open_external_url)
         page.permissionRequested.connect(self._handle_permission)
         
-        # 关键：必须等 Page 创建后，再绑定代理认证信号
+        # 必须等 Page 创建后，再绑定代理认证信号
         page.proxyAuthenticationRequired.connect(self._handle_proxy_auth)
         
         self.setPage(page)
         self.setUrl(QUrl(WHATSAPP_WEB_URL))
 
-    def _setup_proxy(self, proxy_url_str):
-        """解析形如 socks5://user:pass@host:port 的代理"""
-        # 处理没有://的情况
+    def _apply_global_proxy(self, proxy_url_str):
+        """解析代理链接并设置为应用级代理"""
         if "://" not in proxy_url_str:
             proxy_url_str = "http://" + proxy_url_str
 
@@ -135,9 +141,8 @@ class WhatsAppAccount(QWebEngineView):
         proxy.setHostName(proxy_url.host())
         proxy.setPort(proxy_url.port())
 
-        # Qt 的 QUrl 有时无法完整解析带有特殊字符的密码，这里做手动切割兜底
+        # 解析认证信息
         if "@" in proxy_url_str:
-            # 拿到 // 后面到 @ 前面的部分
             auth_part = proxy_url_str.split("://")[-1].split("@")[0]
             if ":" in auth_part:
                 user, pwd = auth_part.split(":", 1)
@@ -147,13 +152,15 @@ class WhatsAppAccount(QWebEngineView):
             proxy.setUser(proxy_url.userName())
             proxy.setPassword(proxy_url.password())
 
-        self.profile.setProxy(proxy)
+        # 设置为全局代理
+        QNetworkProxy.setApplicationProxy(proxy)
 
     def _handle_proxy_auth(self, url, authenticator, proxy):
         """处理代理服务器的密码验证"""
-        if self.profile.proxy().user():
-            authenticator.setUser(self.profile.proxy().user())
-            authenticator.setPassword(self.profile.proxy().password())
+        app_proxy = QNetworkProxy.applicationProxy()
+        if app_proxy.user():
+            authenticator.setUser(app_proxy.user())
+            authenticator.setPassword(app_proxy.password())
 
     def _handle_permission(self, permission):
         """自动允许麦克风/摄像头，其他权限拒绝。"""

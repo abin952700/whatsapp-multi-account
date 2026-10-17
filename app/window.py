@@ -1,5 +1,6 @@
 import re
 import os
+import json
 
 from PyQt6.QtCore import QUrl, Qt, QTimer, QEvent
 from PyQt6.QtWidgets import (
@@ -27,6 +28,7 @@ from app.config import (
     TOP_BAR_HEIGHT,
     ENABLE_LIFECYCLE_FREEZE,
     get_icon_path,
+    get_config_file_path,  # 新增导入
 )
 from app.account import WhatsAppAccount
 from app.updater import UpdateChecker, start_update_check
@@ -89,6 +91,9 @@ class MainWindow(QMainWindow):
         self._balance_tab_resources(self.tabs.currentIndex())
         self._schedule_inactive_unload(self.tabs.currentIndex())
         self._check_for_updates()
+        
+        # 启动时自动读取上次保存的账号
+        self._load_accounts() 
 
     def _set_app_icon(self):
         icon_path = get_icon_path()
@@ -127,6 +132,47 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(index)
         self._schedule_inactive_unload(index)
         self._balance_tab_resources(index)
+        
+        self._save_accounts()  # 新增：保存配置
+
+    def _save_accounts(self):
+        """把当前所有打开的标签页账号信息保存到 JSON"""
+        accounts = []
+        for i in range(self.tabs.count()):
+            widget = self.tabs.widget(i)
+            if isinstance(widget, WhatsAppAccount):
+                accounts.append({
+                    "label": self.tabs.tabText(i),
+                    "profile_name": widget.profile.storageName(),
+                    "proxy_url": getattr(widget, "proxy_url", "")
+                })
+                
+        try:
+            with open(get_config_file_path(), "w", encoding="utf-8") as f:
+                json.dump(accounts, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"保存账号失败: {e}")
+
+    def _load_accounts(self):
+        """启动时从 JSON 加载账号并恢复标签页"""
+        config_path = get_config_file_path()
+        if not os.path.exists(config_path):
+            return
+            
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                accounts = json.load(f)
+                
+            for acc in accounts:
+                label = acc.get("label")
+                profile_name = acc.get("profile_name")
+                proxy_url = acc.get("proxy_url", "")
+                
+                if label and profile_name:
+                    account = WhatsAppAccount(profile_name, proxy_url=proxy_url)
+                    self.tabs.addTab(account, label)
+        except Exception as e:
+            print(f"加载账号失败: {e}")
 
     # ---------- 标签页右键菜单 ----------
 
@@ -164,6 +210,8 @@ class MainWindow(QMainWindow):
 
         self._rebuild_tab_indices()
         widget.deleteLater()
+        
+        self._save_accounts()  # 新增：保存配置
 
     def _close_other_tabs(self, keep_index):
         for i in range(self.tabs.count() - 1, -1, -1):
@@ -189,7 +237,7 @@ class MainWindow(QMainWindow):
 
         self._schedule_inactive_unload(self.tabs.currentIndex())
 
-    # ---------- 顶部栏 ----------
+    # ---------- 顶部栏与样式 ----------
 
     def _setup_actions_menu(self):
         self._actions_menu = QMenu(self)
@@ -217,6 +265,7 @@ class MainWindow(QMainWindow):
         self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().installEventFilter(self)
+        
         tab_height = TOP_BAR_HEIGHT
         button_height = tab_height
         self.tabs.tabBar().setFixedHeight(tab_height)
@@ -274,45 +323,69 @@ class MainWindow(QMainWindow):
         self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._show_tab_context_menu)
 
+        # --- 核心美化样式 ---
         self.tabs.setStyleSheet(
             f"""
-            QTabWidget::pane {{ border: none; }}
-            QTabBar::tab {{
-                min-height: {tab_height}px;
-                max-height: {tab_height}px;
-                padding: 0px 12px;
-                background: #2b2f36;
-                color: #c0c5cc;
-                border: none;
+            /* 标签页整体背景 */
+            QTabWidget::pane {{ 
+                border: none; 
+                background: #1a1b1e; 
             }}
-            QTabBar::tab:selected {{
-                background: #1f6feb;
+            
+            /* 基础标签页样式 */
+            QTabBar::tab {{
+                min-height: {tab_height - 6}px;
+                max-height: {tab_height - 6}px;
+                padding: 3px 12px;
+                margin-top: 6px;     
+                margin-right: 2px;   
+                background: transparent;
+                color: #9ba1a9;
+                border: none;
+                border-radius: 6px;  
+                font-size: 13px;
+            }}
+            
+            /* 悬浮状态 */
+            QTabBar::tab:hover:!selected {{
+                background: #2c2f36;
                 color: #ffffff;
             }}
-            QTabBar::tab:hover:!selected {{
+            
+            /* 选中状态 */
+            QTabBar::tab:selected {{
                 background: #363b44;
                 color: #ffffff;
+                font-weight: bold;
             }}
-            """
-        )
-        self._corner_controls.setStyleSheet(
-            """
-            QWidget#corner_controls {
-                border: none;
-                background: transparent;
-            }
-            QToolButton, QPushButton {
+            
+            /* 顶部控制按钮栏的背景色 */
+            QWidget#corner_controls {{
+                background: #1a1b1e;
+            }}
+            
+            /* 顶部控制按钮的样式 */
+            QToolButton, QPushButton {{
                 border: none;
                 padding: 0px;
                 border-radius: 0px;
-                color: #c0c5cc;
+                color: #9ba1a9;
                 font-weight: 600;
-                font-size:15px;
+                font-size: 15px;
                 outline: none;
-            }
-            QToolButton:hover, QPushButton:hover { background: #363b44; color: #ffffff; }
-            QToolButton:pressed, QPushButton:pressed { background: #1f6feb; color: #ffffff; }
-            QToolButton::menu-indicator { image: none; width: 0px; }
+            }}
+            QToolButton:hover, QPushButton:hover {{ 
+                background: #2c2f36; 
+                color: #ffffff; 
+            }}
+            QToolButton:pressed, QPushButton:pressed {{ 
+                background: #1f6feb; 
+                color: #ffffff; 
+            }}
+            QToolButton::menu-indicator {{ 
+                image: none; 
+                width: 0px; 
+            }}
             """
         )
 
