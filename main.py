@@ -5,7 +5,14 @@ import datetime
 import platform
 
 # Chromium 参数必须在导入 Qt WebEngine 前设置。macOS 不需要 Linux 的 GPU 沙盒参数。
-chromium_flags = ["--enable-logging", "--log-level=1", "--disable-quic"]
+chromium_flags = [
+    "--enable-logging",
+    "--log-level=1",
+    "--disable-quic",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
 if platform.system() == "Linux":
     chromium_flags.append("--disable-gpu-sandbox")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join(chromium_flags))
@@ -17,7 +24,18 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import Qt
 
-from app.config import get_base_storage_dir, get_icon_path
+from app.config import get_base_storage_dir, get_icon_path, initialize_instance
+
+_worker_process = any(
+    flag in sys.argv for flag in ("--windows-account-worker", "--background-account-worker")
+)
+_requested_instance = ""
+if "--instance" in sys.argv:
+    position = sys.argv.index("--instance")
+    if position + 1 >= len(sys.argv):
+        raise SystemExit("--instance requires a name")
+    _requested_instance = sys.argv[position + 1]
+initialize_instance(_requested_instance, acquire_lock=not _worker_process)
 
 # 获取当前运行目录
 os.makedirs(get_base_storage_dir(), exist_ok=True)
@@ -54,13 +72,17 @@ if __name__ == "__main__":
         app.setWindowIcon(QIcon(icon_path))
     
     try:
-        if "--windows-account-worker" in sys.argv:
+        worker_flag = next(
+            (flag for flag in ("--windows-account-worker", "--background-account-worker") if flag in sys.argv),
+            None,
+        )
+        if worker_flag:
             from PyQt6.QtWidgets import QMainWindow
             from app.account import WhatsAppAccount
             from app.config import load_accounts, load_settings
             from app.proxy_extension import apply_proxy_mode
             from app.windows_account import WindowsWorkerState
-            profile = sys.argv[sys.argv.index("--windows-account-worker") + 1]
+            profile = sys.argv[sys.argv.index(worker_flag) + 1]
             config = next(item for item in load_accounts() if item.get("profile_name") == profile)
             mode = str(config.get("proxy_mode") or "none")
             custom = str(config.get("proxy_url") or "")
@@ -68,6 +90,8 @@ if __name__ == "__main__":
             apply_proxy_mode(mode, proxy)
             window = QMainWindow()
             window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            if worker_flag == "--background-account-worker":
+                window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
             account = WhatsAppAccount(profile, proxy_url=proxy)
             window.setCentralWidget(account)
             window.resize(1200, 900); window.show()

@@ -3,6 +3,7 @@ import platform
 import sys
 import json
 import tempfile
+import re
 
 APP_VERSION = "1.0.1"
 GITHUB_REPO = "sejanH/whatsapp-multi-account"
@@ -14,15 +15,75 @@ INACTIVE_UNLOAD_MS = 3 * 60 * 1000
 TOP_BAR_HEIGHT = 32
 ENABLE_LIFECYCLE_FREEZE = False
 
+_INSTANCE_NAME = "instance-1"
+_INSTANCE_LOCK = None
 
-def get_base_storage_dir():
-    """按平台返回账号数据存储根目录。"""
+
+def _application_root():
     if platform.system() == "Windows":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
         return os.path.join(base, "whatsapp-pyqt")
     if platform.system() == "Darwin":
         return os.path.expanduser("~/Library/Application Support/WhatsAppClient")
     return os.path.expanduser("~/.config/whatsapp-pyqt")
+
+
+def _safe_instance_name(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", value):
+        raise ValueError("实例名称只能包含字母、数字、下划线和短横线")
+    return value
+
+
+def initialize_instance(requested="", acquire_lock=True):
+    """选择并锁定实例目录；工作进程只继承实例，不重复加锁。"""
+    global _INSTANCE_NAME, _INSTANCE_LOCK
+    requested = _safe_instance_name(requested)
+    if not acquire_lock:
+        _INSTANCE_NAME = requested or "instance-1"
+        return _INSTANCE_NAME
+
+    candidates = [requested] if requested else [f"instance-{i}" for i in range(1, 100)]
+    lock_dir = os.path.join(_application_root(), ".instance-locks")
+    os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    for name in candidates:
+        path = os.path.join(lock_dir, name + ".lock")
+        handle = open(path, "a+")
+        try:
+            if platform.system() == "Windows":
+                import msvcrt
+                handle.seek(0)
+                handle.write("0")
+                handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError):
+            handle.close()
+            continue
+        _INSTANCE_NAME = name
+        _INSTANCE_LOCK = handle
+        return name
+    if requested:
+        raise RuntimeError(f"实例 {requested} 已经在运行")
+    raise RuntimeError("没有可用的程序实例槽位")
+
+
+def get_instance_name():
+    return _INSTANCE_NAME
+
+
+def get_base_storage_dir():
+    """按平台返回账号数据存储根目录。"""
+    root = _application_root()
+    # instance-1 沿用原目录，确保升级后已有账号和登录状态不丢失。
+    if _INSTANCE_NAME == "instance-1":
+        return root
+    return os.path.join(root, "instances", _INSTANCE_NAME)
 
 
 def get_icon_path():

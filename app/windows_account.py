@@ -7,7 +7,7 @@ from PyQt6.QtCore import QProcess, QTimer, pyqtSignal
 from PyQt6.QtGui import QWindow
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from app.config import get_base_storage_dir
+from app.config import get_base_storage_dir, get_instance_name
 
 
 def ipc_path(profile, name):
@@ -53,10 +53,15 @@ class WindowsAccountProcess(QWidget):
         self.timer.setInterval(500)
         self.timer.timeout.connect(self._poll)
         self.timer.start()
+        # Windows 每个账号都有独立进程，启动后全部保持运行。
+        QTimer.singleShot(0, self.request_load)
 
     def request_load(self):
         if self.process.state() != QProcess.ProcessState.NotRunning: return
-        args = ["--windows-account-worker", self.profile_name]
+        args = [
+            "--windows-account-worker", self.profile_name,
+            "--instance", get_instance_name(),
+        ]
         if getattr(sys, "frozen", False):
             self.process.start(sys.executable, args)
         else:
@@ -108,7 +113,7 @@ class WindowsAccountProcess(QWidget):
 class WindowsWorkerState:
     def __init__(self, profile, window, account):
         self.profile, self.window = profile, window
-        self.state = {"hwnd": int(window.winId()), "phone": "", "unread": 0, "notification": ""}
+        self.state = {"pid": os.getpid(), "hwnd": int(window.winId()), "phone": "", "unread": 0, "notification": ""}
         account.phone_number_changed.connect(self.phone)
         account.unread_count_changed.connect(self.unread)
         account.browser_notification.connect(self.notification)

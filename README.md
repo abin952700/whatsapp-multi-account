@@ -9,6 +9,8 @@
 - 多账号管理：添加账号，并以通讯录式列表单击切换当前账号。
 - 主窗口内嵌：macOS 不打开账号独立窗口，WhatsApp 页面显示在主界面右侧。
 - 登录持久化：Cookie、Local Storage、IndexedDB、Service Worker、缓存和站点权限按账号隔离并保存。
+- 全账号运行：当前账号在主窗口显示，其他账号由各自后台进程持续保持连接。
+- 多开隔离：可以同时启动多个主程序，每个程序实例拥有完全独立的配置、账号和浏览器资料。
 - 账号自动命名：登录成功后从 WhatsApp 页面获取手机号，移除 `+`、空格及其他非数字字符后作为账号名称。
 - 独立代理：每个账号可选择无代理、系统代理、全局代理或自己的自定义代理。
 - HTTP、HTTPS、SOCKS5：支持带用户名和密码的代理地址。
@@ -22,11 +24,11 @@
 
 ### macOS
 
-macOS 使用单个主窗口，账号页面直接内嵌在右侧内容区，不创建独立窗口。Qt WebEngine 的应用代理属于进程级配置，因此同一时刻只激活一个账号页面：切换账号时程序会停止旧页面、切换到目标账号代理，然后加载目标页面。各账号的浏览器 Profile 和登录数据仍完全独立。
+macOS 使用单个主窗口，账号页面直接内嵌在右侧内容区，不创建可见的独立窗口。当前账号在主程序中内嵌显示，其他账号分别由隐藏的后台进程持续运行，以维持连接、未读数和浏览器通知。切换账号时程序会先停止目标账号的后台进程，等待其释放 Profile，再由主窗口接管并显示；离开该账号后，它会重新进入后台进程。各账号的浏览器 Profile、登录数据和进程级代理均独立。
 
 ### Windows
 
-Windows 为每个账号创建独立的 WebEngine 工作进程，并将工作进程窗口嵌入主界面。这使不同账号可以拥有独立的进程级代理，同时用户仍在主窗口中操作。
+Windows 启动后会为所有账号创建独立的 WebEngine 工作进程，并将工作进程窗口嵌入主界面。所有账号会持续运行，各自使用独立的进程级代理，同时用户仍在主窗口中单击账号切换页面。
 
 ## 代理工作原理
 
@@ -80,10 +82,60 @@ macOS 数据目录：
 ~/Library/Application Support/WhatsAppClient/
 ```
 
+第一个实例为兼容旧版本继续使用上述目录，后续实例使用：
+
+```text
+~/Library/Application Support/WhatsAppClient/instances/instance-2/
+~/Library/Application Support/WhatsAppClient/instances/instance-3/
+```
+
 Windows 数据目录：
 
 ```text
 %APPDATA%\whatsapp-pyqt\
+```
+
+后续 Windows 实例同样保存在根目录的 `instances/<实例名>/` 下。
+
+### 多开方式
+
+macOS 同时打开多个程序实例：
+
+```bash
+open -n "dist/WhatsAppClient.app"
+open -n "dist/WhatsAppClient.app"
+```
+
+程序会自动选择第一个未被占用的 `instance-N`。窗口标题会显示当前实例名。实例退出后，对应槽位可以再次使用，并恢复该槽位原有配置和登录状态。
+
+也可以使用固定实例名称，方便明确区分不同业务：
+
+```bash
+open -n "dist/WhatsAppClient.app" --args --instance sales
+open -n "dist/WhatsAppClient.app" --args --instance support
+```
+
+源码模式：
+
+```bash
+python main.py --instance sales
+python main.py --instance support
+```
+
+实例名称只允许字母、数字、下划线和短横线。同名实例正在运行时不能再次启动，以避免两个程序同时写入同一份 Profile 和配置。每个实例启动的账号后台工作进程会继承实例名，但不会重复占用主实例锁。
+
+Windows 可以重复双击 `启动新实例.bat`，每次自动打开一个隔离实例。也可以在命令提示符中指定固定名称：
+
+```bat
+启动新实例.bat sales
+启动新实例.bat support
+```
+
+打包版本也可以直接多开：
+
+```bat
+start "" "dist\WhatsAppClient\WhatsAppClient.exe"
+start "" "dist\WhatsAppClient\WhatsAppClient.exe"
 ```
 
 主要内容：
@@ -174,6 +226,40 @@ open dist/WhatsAppClient.app
 
 构建架构跟随 `.venv` 使用的 Python：Apple Silicon 为 `arm64`，Intel Mac 为 `x86_64`。当前应用未使用 Developer ID 签名和公证；首次运行若被 Gatekeeper 阻止，可在 Finder 中右键应用并选择“打开”。正式分发时应完成签名和公证。
 
+## Windows 安装、启动和打包
+
+首次安装依赖，双击：
+
+```bat
+setup_windows.bat
+```
+
+从源码启动：
+
+```bat
+启动.bat
+```
+
+启动指定实例：
+
+```bat
+启动.bat --instance sales
+```
+
+打包：
+
+```bat
+build.bat
+```
+
+生成文件位于：
+
+```text
+dist\WhatsAppClient\WhatsAppClient.exe
+```
+
+分发时需要复制整个 `dist\WhatsAppClient` 目录，不能只复制 EXE。
+
 ## Linux AppImage
 
 构建：
@@ -201,6 +287,7 @@ chmod +x WhatsAppClient-x86_64.AppImage
 main.py                    应用入口、Chromium 参数和 Windows 工作进程入口
 app/window.py              主界面、账号列表、当前账号操作和页面切换
 app/account.py             WebEngine Profile、WhatsApp 页面、通知和号码识别
+app/mac_account.py         macOS 前台内嵌与后台账号进程交接
 app/proxy_extension.py     代理解析、检测、本地网关和上游隧道
 app/country.py             真实代理出口国家检测
 app/config.py              路径、配置读取和原子持久化
@@ -208,4 +295,8 @@ app/windows_account.py     Windows 独立账号进程及嵌入逻辑
 scripts/setup_mac.sh       macOS 虚拟环境安装
 scripts/start_mac.sh       macOS 源码启动
 scripts/build_mac.sh       macOS .app 打包
+setup_windows.bat          Windows 虚拟环境和依赖安装
+启动.bat                   Windows 源码启动，可传递 --instance
+启动新实例.bat             Windows 自动或命名多开入口
+build.bat                  Windows PyInstaller 打包
 ```

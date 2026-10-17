@@ -32,6 +32,7 @@ from app.config import (
     INACTIVE_UNLOAD_MS,
     ENABLE_LIFECYCLE_FREEZE,
     get_icon_path,
+    get_instance_name,
     load_settings,
     save_settings,
     load_accounts as load_account_configs,
@@ -39,6 +40,7 @@ from app.config import (
 )
 from app.account import WhatsAppAccount
 from app.windows_account import WindowsAccountProcess
+from app.mac_account import MacAccountRuntime
 from app.country import CountryResolver, country_flag
 from app.proxy_extension import apply_proxy_mode, parse_proxy_url
 from app.updater import UpdateChecker, start_update_check
@@ -127,7 +129,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         if platform.system() != "Darwin":
             self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.setWindowTitle("WhatsApp Multi-Account")
+        self.setWindowTitle(f"WhatsApp Multi-Account · {get_instance_name()}")
         self.resize(1200, 900)
 
         self._set_app_icon()
@@ -168,7 +170,11 @@ class MainWindow(QMainWindow):
         effective_proxy = self.global_proxy_url if proxy_mode == "global" else (
             proxy_url or "" if proxy_mode == "custom" else ""
         )
-        account_class = WindowsAccountProcess if platform.system() == "Windows" else WhatsAppAccount
+        account_class = (
+            WindowsAccountProcess if platform.system() == "Windows"
+            else MacAccountRuntime if platform.system() == "Darwin"
+            else WhatsAppAccount
+        )
         account = account_class(profile_name, proxy_url=effective_proxy)
         account.proxy_mode = proxy_mode
         account.custom_proxy_url = proxy_url or ""
@@ -203,7 +209,7 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= self.account_list.count():
             return None
         widget = self.pages.widget(index + 1)
-        return widget if isinstance(widget, (WhatsAppAccount, WindowsAccountProcess)) else None
+        return widget if isinstance(widget, (WhatsAppAccount, WindowsAccountProcess, MacAccountRuntime)) else None
 
     def _account_label(self, index):
         item = self.account_list.item(index)
@@ -399,7 +405,7 @@ class MainWindow(QMainWindow):
             self._set_account_location_pending(item, effective_proxy, data["proxy_mode"])
             accounts.append(account)
         self._save_accounts()
-        if platform.system() == "Windows":
+        if platform.system() in {"Windows", "Darwin"}:
             for account in accounts:
                 account.restart()
             return
@@ -425,7 +431,7 @@ class MainWindow(QMainWindow):
         accounts = []
         for i in range(self.account_list.count()):
             widget = self._account_at(i)
-            if isinstance(widget, (WhatsAppAccount, WindowsAccountProcess)):
+            if isinstance(widget, (WhatsAppAccount, WindowsAccountProcess, MacAccountRuntime)):
                 accounts.append({
                     "label": self._account_label(i),
                     "profile_name": widget.profile.storageName(),
@@ -502,6 +508,9 @@ class MainWindow(QMainWindow):
         if widget is None:
             return
 
+        if isinstance(widget, (WindowsAccountProcess, MacAccountRuntime)):
+            widget.terminate()
+
         self.account_list.takeItem(index)
         self.pages.removeWidget(widget)
 
@@ -533,7 +542,7 @@ class MainWindow(QMainWindow):
 
         for i in range(self.account_list.count()):
             widget = self._account_at(i)
-            if not isinstance(widget, (WhatsAppAccount, WindowsAccountProcess)):
+            if not isinstance(widget, (WhatsAppAccount, WindowsAccountProcess, MacAccountRuntime)):
                 continue
             timer = QTimer(self)
             timer.setSingleShot(True)
@@ -601,7 +610,7 @@ class MainWindow(QMainWindow):
             if account is not None:
                 account.proxy_url = proxy_url
                 account.proxy_config = parse_proxy_url(proxy_url)
-                if isinstance(account, WindowsAccountProcess):
+                if isinstance(account, (WindowsAccountProcess, MacAccountRuntime)):
                     account.restart()
             self._set_account_location_pending(item, proxy_url, "global")
 
@@ -611,7 +620,7 @@ class MainWindow(QMainWindow):
         if (current_item is not None
                 and current_item.data(self.PROXY_MODE_ROLE) == "global"
                 and current_row == self._active_index
-                and platform.system() != "Windows"):
+                and platform.system() not in {"Windows", "Darwin"}):
             account = self._account_at(current_row)
             if account is not None:
                 self._reload_embedded_account(current_row)
@@ -634,7 +643,7 @@ class MainWindow(QMainWindow):
         toolbar_layout.setContentsMargins(18, 0, 8, 0)
         toolbar_layout.setSpacing(6)
 
-        title = QLabel("WhatsApp Multi-Account", self._toolbar)
+        title = QLabel(f"WhatsApp Multi-Account · {get_instance_name()}", self._toolbar)
         title.setObjectName("app_title")
         toolbar_layout.addWidget(title)
         toolbar_layout.addStretch()
@@ -848,7 +857,7 @@ class MainWindow(QMainWindow):
         account = self._current_account()
         if not account:
             return
-        if isinstance(account, WindowsAccountProcess):
+        if isinstance(account, (WindowsAccountProcess, MacAccountRuntime)):
             QMessageBox.information(self, "缓存", "请先删除账号后再手动清理其数据目录。")
             return
         account.page().profile().clearHttpCache()
@@ -870,7 +879,9 @@ class MainWindow(QMainWindow):
         previous_index = self._active_index
         if previous_index >= 0 and previous_index != index:
             previous = self._account_at(previous_index)
-            if previous is not None and not isinstance(previous, WindowsAccountProcess):
+            if isinstance(previous, MacAccountRuntime):
+                previous.deactivate()
+            elif previous is not None and not isinstance(previous, WindowsAccountProcess):
                 previous.cancel_pending_load()
                 previous.stop()
                 previous.setUrl(QUrl("about:blank"))
@@ -878,7 +889,7 @@ class MainWindow(QMainWindow):
         widget = self._account_at(index)
         if widget is None:
             return
-        if not isinstance(widget, WindowsAccountProcess):
+        if not isinstance(widget, (WindowsAccountProcess, MacAccountRuntime)):
             try:
                 apply_proxy_mode(getattr(widget, "proxy_mode", "none"), widget.proxy_url)
             except ValueError as exc:
@@ -899,7 +910,7 @@ class MainWindow(QMainWindow):
         account = self._account_at(index)
         if account is None:
             return
-        if isinstance(account, WindowsAccountProcess):
+        if isinstance(account, (WindowsAccountProcess, MacAccountRuntime)):
             account.restart()
             return
         account.cancel_pending_load()
@@ -931,11 +942,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """退出前保存账号清单、代理选择和当前账号。"""
         self._save_accounts()
-        if platform.system() == "Windows":
-            for index in range(self.account_list.count()):
-                account = self._account_at(index)
-                if isinstance(account, WindowsAccountProcess):
-                    account.terminate()
+        for index in range(self.account_list.count()):
+            account = self._account_at(index)
+            if isinstance(account, (WindowsAccountProcess, MacAccountRuntime)):
+                account.terminate()
         current = self.account_list.currentItem()
         if current is not None:
             self.settings["selected_profile"] = str(
