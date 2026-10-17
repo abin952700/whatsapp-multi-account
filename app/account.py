@@ -80,6 +80,7 @@ class WhatsAppWebPage(QWebEnginePage):
 
 class WhatsAppAccount(QWebEngineView):
     proxy_check_finished = pyqtSignal(int, bool, str)
+    load_status_changed = pyqtSignal(str, int, bool)
     unread_count_changed = pyqtSignal(int)
     browser_notification = pyqtSignal(str, str)
     phone_number_changed = pyqtSignal(str)
@@ -189,6 +190,7 @@ class WhatsAppAccount(QWebEngineView):
         token = self._proxy_check_token
         self._retry_button.hide()
         self._loading_label.setText("正在检测代理与 WhatsApp 的连接…")
+        self.load_status_changed.emit("正在检测代理与 WhatsApp 的连接…", 0, False)
         self._loading_overlay.show()
         self._loading_overlay.raise_()
         if not self.proxy_url:
@@ -216,10 +218,12 @@ class WhatsAppAccount(QWebEngineView):
         if token != self._proxy_check_token:
             return
         if success:
+            self.load_status_changed.emit("代理连接正常，正在打开 WhatsApp…", 5, False)
             self.setUrl(QUrl(WHATSAPP_WEB_URL))
             return
         self._load_timeout.stop()
         self._loading_label.setText(f"WhatsApp 页面加载失败\n{message}")
+        self.load_status_changed.emit(f"代理检测失败：{message}", 0, False)
         self._retry_button.show()
         self._loading_overlay.show()
         self._loading_overlay.raise_()
@@ -238,23 +242,29 @@ class WhatsAppAccount(QWebEngineView):
         self._timed_out = False
         self._load_timeout.start()
         self._loading_label.setText("正在加载 WhatsApp…")
+        self.load_status_changed.emit("正在加载 WhatsApp…", 0, False)
         self._retry_button.hide()
         self._loading_overlay.show()
         self._loading_overlay.raise_()
 
     def _on_load_progress(self, progress):
         self._loading_label.setText(f"正在加载 WhatsApp… {progress}%")
+        self.load_status_changed.emit(f"正在加载 WhatsApp… {progress}%", progress, False)
 
     def _on_load_finished(self, success):
         self._load_timeout.stop()
         if self._timed_out:
             return
         if success:
+            self.load_status_changed.emit("WhatsApp 加载完成", 100, True)
             self._loading_overlay.hide()
             self._phone_timer.start()
             QTimer.singleShot(2_000, self._detect_phone_number)
             return
         self._loading_label.setText("WhatsApp 页面加载失败\n请检查网络或代理设置")
+        self.load_status_changed.emit(
+            "WhatsApp 页面加载失败，请检查网络或代理设置", 100, False
+        )
         self._retry_button.show()
         self._loading_overlay.show()
         self._loading_overlay.raise_()
@@ -299,6 +309,9 @@ class WhatsAppAccount(QWebEngineView):
         self.stop()
         self._loading_label.setText(
             "WhatsApp 加载超时\n当前网络可以访问网站，但 WebEngine 未完成加载"
+        )
+        self.load_status_changed.emit(
+            "WhatsApp 加载超时：代理可连接，但 WebEngine 未完成加载", 100, False
         )
         self._retry_button.show()
         self._loading_overlay.show()
