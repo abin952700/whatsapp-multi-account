@@ -1,3 +1,5 @@
+import ctypes
+from ctypes import wintypes
 import json
 import os
 import sys
@@ -5,10 +7,31 @@ import time
 import uuid
 
 from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QWindow
 from PyQt6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
 from app.config import get_base_storage_dir, get_instance_name
+
+
+def _windows_user32():
+    """返回已声明 64 位安全签名的 user32 API。"""
+    user32 = ctypes.windll.user32
+    hwnd = wintypes.HWND
+    user32.GetWindowLongPtrW.argtypes = [hwnd, ctypes.c_int]
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowLongPtrW.argtypes = [hwnd, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetParent.argtypes = [hwnd, hwnd]
+    user32.SetParent.restype = hwnd
+    user32.ShowWindow.argtypes = [hwnd, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetWindowPos.argtypes = [
+        hwnd, hwnd, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    user32.SetFocus.argtypes = [hwnd]
+    user32.SetFocus.restype = hwnd
+    return user32
 
 
 def ipc_path(profile, name):
@@ -30,6 +53,76 @@ class _ProfileName:
     def storageName(self): return self.name
 
 
+class WindowsNativeHost(QWidget):
+    """使用 Win32 API 将另一个进程的顶层 HWND 嵌入此控件。"""
+
+    GWL_STYLE = -16
+    GWL_EXSTYLE = -20
+    WS_CHILD = 0x40000000
+    WS_VISIBLE = 0x10000000
+    WS_POPUP = 0x80000000
+    WS_CAPTION = 0x00C00000
+    WS_THICKFRAME = 0x00040000
+    WS_CLIPCHILDREN = 0x02000000
+    WS_CLIPSIBLINGS = 0x04000000
+    WS_EX_APPWINDOW = 0x00040000
+    WS_EX_TOOLWINDOW = 0x00000080
+    SW_SHOWNA = 8
+    SWP_NOACTIVATE = 0x0010
+    SWP_FRAMECHANGED = 0x0020
+
+    def __init__(self, hwnd, parent=None):
+        super().__init__(parent)
+        self.hwnd = int(hwnd)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._attach()
+
+    def _attach(self):
+        if sys.platform != "win32" or not self.hwnd:
+            return
+        user32 = _windows_user32()
+        host_hwnd = int(self.winId())
+        get_style = user32.GetWindowLongPtrW
+        set_style = user32.SetWindowLongPtrW
+        style = int(get_style(self.hwnd, self.GWL_STYLE))
+        style &= ~(self.WS_POPUP | self.WS_CAPTION | self.WS_THICKFRAME)
+        style |= self.WS_CHILD | self.WS_VISIBLE | self.WS_CLIPCHILDREN | self.WS_CLIPSIBLINGS
+        set_style(self.hwnd, self.GWL_STYLE, style)
+        exstyle = int(get_style(self.hwnd, self.GWL_EXSTYLE))
+        exstyle = (exstyle & ~self.WS_EX_APPWINDOW) | self.WS_EX_TOOLWINDOW
+        set_style(self.hwnd, self.GWL_EXSTYLE, exstyle)
+        user32.SetParent(self.hwnd, host_hwnd)
+        user32.ShowWindow(self.hwnd, self.SW_SHOWNA)
+        self._fit_window()
+
+    def _fit_window(self):
+        if sys.platform != "win32" or not self.hwnd:
+            return
+        _windows_user32().SetWindowPos(
+            self.hwnd,
+            0,
+            0,
+            0,
+            max(1, self.width()),
+            max(1, self.height()),
+            self.SWP_NOACTIVATE | self.SWP_FRAMECHANGED,
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_window()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_window()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        if sys.platform == "win32" and self.hwnd:
+            _windows_user32().SetFocus(self.hwnd)
+
+
 class WindowsAccountProcess(QWidget):
     unread_count_changed = pyqtSignal(int)
     browser_notification = pyqtSignal(str, str)
@@ -45,7 +138,6 @@ class WindowsAccountProcess(QWidget):
         self.process.finished.connect(self._finished)
         self.process.errorOccurred.connect(self._process_error)
         self._restart = False
-        self._foreign = None
         self._container = None
         self._last_state = None
         self._worker_token = ""
@@ -113,7 +205,6 @@ class WindowsAccountProcess(QWidget):
     def _finished(self):
         if self._container:
             self._container.deleteLater(); self._container = None
-        self._foreign = None
         if self._restart:
             self._restart = False
             QTimer.singleShot(300, self.request_load)
@@ -142,9 +233,7 @@ class WindowsAccountProcess(QWidget):
         self._last_state = state
         hwnd = int(state.get("hwnd") or 0)
         if hwnd and self._container is None:
-            self._foreign = QWindow.fromWinId(hwnd)
-            self._container = QWidget.createWindowContainer(self._foreign, self)
-            self._container.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self._container = WindowsNativeHost(hwnd, self)
             # 页面占据上方主体区域，加载状态与进度条固定显示在下方。
             self.layout.insertWidget(0, self._container, 1)
             self._container.show()
