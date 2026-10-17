@@ -38,10 +38,17 @@ if platform.system() == "Linux":
 # Windows 的每账号代理必须在导入 Qt WebEngine 之前配置，否则 Chromium
 # 网络服务可能已启动并忽略后续的 QNetworkProxy 设置，页面会停在 0%。
 _prepared_windows_worker_proxy = False
-if "--windows-account-worker" in sys.argv:
+_windows_proxy_worker_flag = next(
+    (
+        flag for flag in ("--windows-account-worker", "--background-account-worker")
+        if flag in sys.argv
+    ),
+    None,
+) if platform.system() == "Windows" else None
+if _windows_proxy_worker_flag:
     from app.proxy_extension import prepare_chromium_proxy
 
-    profile_arg = sys.argv[sys.argv.index("--windows-account-worker") + 1]
+    profile_arg = sys.argv[sys.argv.index(_windows_proxy_worker_flag) + 1]
     account_config = next(
         item for item in load_accounts()
         if item.get("profile_name") == profile_arg

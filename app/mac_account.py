@@ -1,6 +1,8 @@
 import json
 import os
+import platform
 import sys
+import uuid
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
@@ -25,7 +27,7 @@ class _ProfileName:
 
 
 class MacAccountRuntime(QWidget):
-    """当前账号内嵌显示，其余账号由隐藏进程持续运行。"""
+    """当前账号原生内嵌显示，其余账号由隐藏进程持续运行。"""
 
     unread_count_changed = pyqtSignal(int)
     browser_notification = pyqtSignal(str, str)
@@ -44,6 +46,8 @@ class MacAccountRuntime(QWidget):
         self._active = False
         self._restart_background = False
         self._last_state = None
+        self._last_notification_id = ""
+        self._worker_token = ""
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -65,6 +69,7 @@ class MacAccountRuntime(QWidget):
         return [
             "--background-account-worker", self.profile_name,
             "--instance", get_instance_name(),
+            "--worker-token", self._worker_token,
         ]
 
     def start_background(self):
@@ -75,6 +80,8 @@ class MacAccountRuntime(QWidget):
         except OSError:
             pass
         self._last_state = None
+        self._last_notification_id = ""
+        self._worker_token = uuid.uuid4().hex
         if getattr(sys, "frozen", False):
             self.process.start(sys.executable, self._worker_args())
         else:
@@ -170,7 +177,10 @@ class MacAccountRuntime(QWidget):
                 state = json.load(file)
         except (OSError, ValueError):
             return
-        if int(state.get("pid") or 0) != int(self.process.processId()):
+        if platform.system() == "Windows":
+            if str(state.get("worker_token") or "") != self._worker_token:
+                return
+        elif int(state.get("pid") or 0) != int(self.process.processId()):
             return
         if state == self._last_state:
             return
@@ -181,5 +191,7 @@ class MacAccountRuntime(QWidget):
             self.phone_number_changed.emit(phone)
         self.unread_count_changed.emit(int(state.get("unread") or 0))
         note = str(state.get("notification") or "")
-        if note:
+        notification_id = str(state.get("notification_id") or "")
+        if note and notification_id and notification_id != self._last_notification_id:
+            self._last_notification_id = notification_id
             self.browser_notification.emit("WhatsApp", note)

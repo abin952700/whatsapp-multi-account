@@ -171,8 +171,8 @@ class MainWindow(QMainWindow):
             proxy_url or "" if proxy_mode == "custom" else ""
         )
         account_class = (
-            WindowsAccountProcess if platform.system() == "Windows"
-            else MacAccountRuntime if platform.system() == "Darwin"
+            MacAccountRuntime
+            if platform.system() in {"Windows", "Darwin"}
             else WhatsAppAccount
         )
         account = account_class(profile_name, proxy_url=effective_proxy)
@@ -898,8 +898,8 @@ class MainWindow(QMainWindow):
                 previous.cancel_pending_load()
                 previous.stop()
                 previous.setUrl(QUrl("about:blank"))
-            # Windows 账号不停止、不卸载；未激活账号仍在各自进程中
-            # 保持登录，并继续上报未读数和浏览器通知。
+            # Windows/macOS 未激活账号会切回隐藏后台进程，保持登录并
+            # 继续上报未读数和浏览器通知；界面只渲染当前账号。
 
         widget = self._account_at(index)
         if widget is None:
