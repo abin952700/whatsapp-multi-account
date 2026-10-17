@@ -129,8 +129,8 @@ class WindowsAccountProcess(QWidget):
         self.timer.setInterval(500)
         self.timer.timeout.connect(self._poll)
         self.timer.start()
-        # Windows 每个账号都有独立进程，启动后全部保持运行。
-        QTimer.singleShot(0, self.request_load)
+        # 延迟到账号真正被选中时再启动。启动阶段只创建轻量占位控件，
+        # 避免多个 Chromium 子进程同时初始化拖慢主窗口显示。
 
     def request_load(self):
         if self.process.state() != QProcess.ProcessState.NotRunning: return
@@ -159,8 +159,8 @@ class WindowsAccountProcess(QWidget):
     def terminate(self):
         if self.process.state() == QProcess.ProcessState.NotRunning: return
         self.process.terminate()
-        if not self.process.waitForFinished(3000):
-            self.process.kill(); self.process.waitForFinished(1000)
+        # 不在 UI 线程同步等待；多个账号退出时，逐个 wait 会让窗口卡住数秒。
+        # 子进程自身有正常退出路径，必要时由系统回收。
 
     def cancel_pending_load(self): pass
     def stop(self): pass

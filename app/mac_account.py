@@ -63,7 +63,8 @@ class MacAccountRuntime(QWidget):
         self.timer.setInterval(750)
         self.timer.timeout.connect(self._poll_state)
         self.timer.start()
-        QTimer.singleShot(0, self.start_background)
+        # 后台进程在账号首次被选中时启动，避免启动阶段为所有账号并发
+        # 初始化 WebEngine。
 
     def _worker_args(self):
         return [
@@ -156,9 +157,7 @@ class MacAccountRuntime(QWidget):
         if self.process.state() == QProcess.ProcessState.NotRunning:
             return
         self.process.terminate()
-        if not self.process.waitForFinished(5000):
-            self.process.kill()
-            self.process.waitForFinished(1500)
+        # 关闭窗口时不要同步等待每个后台进程，避免账号数量放大退出耗时。
 
     def _process_finished(self):
         if self._restart_background and not self._active:
