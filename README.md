@@ -46,6 +46,41 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
+## Per-account proxies
+
+Configure the shared proxy from **Menu > Global proxy settings**. When adding
+an account, choose either the global proxy or enter a custom proxy for that
+account. Supported formats include:
+
+```text
+http://host:port
+http://username:password@host:port
+https://username:password@host:port
+socks5://username:password@host:port
+```
+
+Each account runs in its own WebEngine worker process. The worker applies that
+account's proxy before loading WhatsApp, so different accounts can remain online
+simultaneously without sharing an application-level proxy. The main window is an
+account controller; selecting an account opens its independent native window.
+Leave the global proxy setting empty to disable it. The account list resolves the
+proxy IP's country in the background and displays its flag and country name.
+Credentials are stored locally with the account configuration; protect access
+to your user account.
+
+## Persistent sessions
+
+Account definitions, proxy choices, and the last selected account are restored
+on the next launch. Each account has a permanent isolated profile directory
+containing its WhatsApp cookies, local storage, IndexedDB, service workers,
+cache, and persisted permissions. On macOS this data is stored under:
+
+```text
+~/Library/Application Support/WhatsAppClient/
+```
+
+Do not delete this directory if you want to keep WhatsApp login sessions.
+
 ## AppImage (Linux)
 
 1. Install build tools (PyInstaller, appimagetool).
@@ -56,20 +91,50 @@ python3 main.py
 
 The resulting `WhatsAppClient-x86_64.AppImage` will be created in the project root when `appimagetool` is available.
 
-## macOS (.app)
+## macOS
 
-1. Create a virtual environment and install dependencies:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-2. Build the app bundle:
-   ```bash
-   bash scripts/build_mac.sh
-   ```
+The following commands must be run on macOS. First, create the virtual
+environment and install dependencies:
 
-The resulting `WhatsAppClient.app` will be created in `dist/`.
+```bash
+make mac-setup
+```
+
+The setup script selects an installed Python version from 3.9 through 3.14;
+Python 3.15 is not supported by the pinned PyInstaller version. To choose an
+interpreter explicitly, run `MAC_PYTHON=/path/to/python3 make mac-setup`.
+
+Run directly from source:
+
+```bash
+make mac-run
+```
+
+Build the `.app` bundle and open it:
+
+```bash
+make mac-build
+make mac-open
+```
+
+The resulting application is created at `dist/WhatsAppClient.app`. The bundle
+is built for the architecture of the Python interpreter used by `.venv`
+(`arm64` on Apple Silicon or `x86_64` on Intel Macs).
+
+The underlying scripts can also be run without `make`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+bash scripts/start_mac.sh
+bash scripts/build_mac.sh
+open dist/WhatsAppClient.app
+```
+
+The application is unsigned. On first launch, if Gatekeeper blocks it, use
+Finder's **Open** context-menu action. For distribution to other users, sign
+and notarize the application with an Apple Developer ID.
 
 ## Using the AppImage
 

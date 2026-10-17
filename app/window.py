@@ -1,11 +1,10 @@
-import re
 import os
-import json
+import platform
+import uuid
 
-from PyQt6.QtCore import QUrl, Qt, QTimer, QEvent
+from PyQt6.QtCore import QUrl, Qt, QTimer, QEvent, QSize
 from PyQt6.QtWidgets import (
     QMainWindow,
-    QTabWidget,
     QMessageBox,
     QMenu,
     QToolButton,
@@ -17,6 +16,12 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QDialogButtonBox,
+    QListWidget,
+    QListWidgetItem,
+    QStackedWidget,
+    QFrame,
+    QComboBox,
+    QAbstractItemView,
 )
 from PyQt6.QtGui import QIcon, QDesktopServices, QAction
 
@@ -25,33 +30,48 @@ from app.config import (
     GITHUB_REPO,
     WHATSAPP_WEB_URL,
     INACTIVE_UNLOAD_MS,
-    TOP_BAR_HEIGHT,
     ENABLE_LIFECYCLE_FREEZE,
     get_icon_path,
-    get_config_file_path,  # 新增导入
+    load_settings,
+    save_settings,
+    load_accounts as load_account_configs,
+    save_accounts as save_account_configs,
 )
-from app.account import WhatsAppAccount
+from app.process_account import AccountProcessPanel
+from app.country import CountryResolver, country_flag
+from app.proxy_extension import parse_proxy_url
 from app.updater import UpdateChecker, start_update_check
 
 
 class AddAccountDialog(QDialog):
     """自定义添加账号对话框，支持直接粘贴代理链接"""
-    def __init__(self, parent=None):
+    def __init__(self, global_proxy="", parent=None, name="", proxy_mode="none", proxy_url=""):
         super().__init__(parent)
-        self.setWindowTitle("添加账号")
+        self.setWindowTitle("编辑账号" if name else "添加账号")
         self.resize(350, 180)
 
         layout = QVBoxLayout(self)
 
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("例如：工作号 (必填)")
-        layout.addWidget(QLabel("账号名称："))
-        layout.addWidget(self.name_input)
+        self.proxy_mode = QComboBox()
+        self.proxy_mode.addItem("无代理（直接连接）", "none")
+        self.proxy_mode.addItem("使用系统代理", "system")
+        global_label = "使用全局代理" if global_proxy else "使用全局代理（未配置）"
+        self.proxy_mode.addItem(global_label, "global")
+        self.proxy_mode.addItem("自定义代理", "custom")
+        selected_index = self.proxy_mode.findData(proxy_mode)
+        if selected_index >= 0:
+            self.proxy_mode.setCurrentIndex(selected_index)
+        layout.addWidget(QLabel("代理方式："))
+        layout.addWidget(self.proxy_mode)
 
         self.proxy_input = QLineEdit()
         self.proxy_input.setPlaceholderText("例如: socks5://账号:密码@IP:端口")
-        layout.addWidget(QLabel("代理链接 (留空则不走代理)："))
+        self.proxy_input.setText(proxy_url)
+        self.proxy_label = QLabel("自定义代理地址：")
+        layout.addWidget(self.proxy_label)
         layout.addWidget(self.proxy_input)
+        self.proxy_mode.currentIndexChanged.connect(self._update_proxy_input)
+        self._update_proxy_input()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -60,15 +80,52 @@ class AddAccountDialog(QDialog):
 
     def get_data(self):
         return {
-            "name": self.name_input.text().strip(),
+            "proxy_mode": self.proxy_mode.currentData(),
             "proxy_url": self.proxy_input.text().strip(),
         }
 
+    def _update_proxy_input(self):
+        custom = self.proxy_mode.currentData() == "custom"
+        self.proxy_label.setVisible(custom)
+        self.proxy_input.setVisible(custom)
+
+
+class GlobalProxyDialog(QDialog):
+    def __init__(self, proxy_url="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("全局代理")
+        self.resize(440, 150)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("新账号可选择使用此全局代理；留空表示未配置。"))
+        self.proxy_input = QLineEdit(proxy_url)
+        self.proxy_input.setPlaceholderText("http://账号:密码@IP:端口")
+        layout.addWidget(self.proxy_input)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def proxy_url(self):
+        return self.proxy_input.text().strip()
+
 
 class MainWindow(QMainWindow):
+    LABEL_ROLE = Qt.ItemDataRole.UserRole
+    PROFILE_ROLE = Qt.ItemDataRole.UserRole + 1
+    PROXY_MODE_ROLE = Qt.ItemDataRole.UserRole + 2
+    LOCATION_REQUEST_ROLE = Qt.ItemDataRole.UserRole + 3
+    STATUS_ROLE = Qt.ItemDataRole.UserRole + 4
+    ICON_ROLE = Qt.ItemDataRole.UserRole + 5
+    UNREAD_ROLE = Qt.ItemDataRole.UserRole + 6
+    NOTIFICATION_ROLE = Qt.ItemDataRole.UserRole + 7
+    PHONE_ROLE = Qt.ItemDataRole.UserRole + 8
+
     def __init__(self):
         super().__init__()
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        if platform.system() != "Darwin":
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("WhatsApp Multi-Account")
         self.resize(1200, 900)
 
@@ -81,19 +138,21 @@ class MainWindow(QMainWindow):
         self._suspended_tabs = set()
         self._drag_active = False
         self._drag_offset = None
-
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._active_index = -1
+        self.settings = load_settings()
+        self.global_proxy_url = str(self.settings.get("global_proxy_url") or "").strip()
+        self.country_resolver = CountryResolver(self)
+        self.country_resolver.resolved.connect(self._on_country_resolved)
 
         self._setup_actions_menu()
-        self._setup_top_bar_controls()
-        self._balance_tab_resources(self.tabs.currentIndex())
-        self._schedule_inactive_unload(self.tabs.currentIndex())
-        self._check_for_updates()
-        
+        self._setup_contact_layout()
+
         # 启动时自动读取上次保存的账号
-        self._load_accounts() 
+        self._load_accounts()
+        self._update_empty_state()
+        self._balance_tab_resources(self.account_list.currentRow())
+        self._schedule_inactive_unload(self.account_list.currentRow())
+        self._check_for_updates()
 
     def _set_app_icon(self):
         icon_path = get_icon_path()
@@ -102,87 +161,336 @@ class MainWindow(QMainWindow):
 
     # ---------- 账号管理 ----------
 
-    def _create_account_tab(self, profile_name, label, proxy_url=None):
-        account = WhatsAppAccount(profile_name, proxy_url=proxy_url)
-        index = self.tabs.addTab(account, label)
-        return index
+    def _create_account_tab(self, profile_name, label, proxy_url=None, proxy_mode="global", phone=""):
+        if phone:
+            label = str(phone)
+        effective_proxy = self.global_proxy_url if proxy_mode == "global" else (
+            proxy_url or "" if proxy_mode == "custom" else ""
+        )
+        account = AccountProcessPanel(profile_name, self)
+        account.proxy_mode = proxy_mode
+        account.proxy_url = effective_proxy
+        account.custom_proxy_url = proxy_url or ""
+        account.phone_number = str(phone or "")
+        account.state_changed.connect(self._on_process_state)
+        self.pages.addWidget(account)
+        item = QListWidgetItem(label)
+        item.setData(self.LABEL_ROLE, label)
+        item.setData(self.PROFILE_ROLE, profile_name)
+        item.setData(self.PROXY_MODE_ROLE, proxy_mode)
+        item.setData(self.UNREAD_ROLE, 0)
+        item.setData(self.NOTIFICATION_ROLE, "")
+        item.setData(self.PHONE_ROLE, str(phone or ""))
+        item.setToolTip(label)
+        item.setSizeHint(QSize(0, 58))
+        self.account_list.addItem(item)
+        self._set_account_location_pending(item, effective_proxy, proxy_mode)
+        # 延迟到账号清单落盘后再启动，确保工作进程能读取新账号配置。
+        QTimer.singleShot(300, lambda panel=account: panel.start(hidden=True))
+        self._update_empty_state()
+        return self.account_list.count() - 1
+
+    def _account_at(self, index):
+        if index < 0 or index >= self.account_list.count():
+            return None
+        widget = self.pages.widget(index + 1)
+        return widget if isinstance(widget, AccountProcessPanel) else None
+
+    def _on_process_state(self, profile_name, state):
+        phone = str(state.get("phone") or "")
+        if phone:
+            account = next(
+                (self._account_at(i) for i in range(self.account_list.count())
+                 if str(self.account_list.item(i).data(self.PROFILE_ROLE) or "") == profile_name),
+                None,
+            )
+            if account is not None:
+                account.phone_number = phone
+            self._on_phone_number(profile_name, phone)
+        self._on_unread_count(profile_name, int(state.get("unread") or 0))
+        notification = str(state.get("notification") or "")
+        if notification:
+            self._on_browser_notification(profile_name, "WhatsApp", notification)
+
+    def _account_label(self, index):
+        item = self.account_list.item(index)
+        return str(item.data(self.LABEL_ROLE) or "") if item else ""
+
+    def _set_account_location_pending(self, item, proxy_url, proxy_mode):
+        label = str(item.data(self.LABEL_ROLE) or "")
+        request_id = uuid.uuid4().hex
+        item.setData(self.LOCATION_REQUEST_ROLE, request_id)
+        if proxy_mode == "system":
+            item.setData(self.ICON_ROLE, "⚙️")
+            item.setData(self.STATUS_ROLE, "系统代理")
+            self._render_account_item(item)
+            item.setToolTip(f"{label}\n跟随 macOS 系统代理设置")
+            return
+        if proxy_mode == "none":
+            item.setData(self.ICON_ROLE, "🌐")
+            item.setData(self.STATUS_ROLE, "无代理 · 直连")
+            self._render_account_item(item)
+            item.setToolTip(f"{label}\n不使用代理")
+            return
+        if not proxy_url:
+            item.setData(self.ICON_ROLE, "🌐")
+            item.setData(self.STATUS_ROLE, "直连")
+            self._render_account_item(item)
+            item.setToolTip(f"{label}\n未使用代理")
+            return
+        config = parse_proxy_url(proxy_url)
+        mode_label = "全局代理" if proxy_mode == "global" else "自定义代理"
+        item.setData(self.ICON_ROLE, "⏳")
+        item.setData(self.STATUS_ROLE, f"{mode_label} · 检测国家…")
+        self._render_account_item(item)
+        item.setToolTip(f"{label}\n{mode_label}: {config.host}:{config.port}")
+        self.country_resolver.lookup(request_id, config.host)
+
+    def _on_country_resolved(self, request_id, code, country):
+        for index in range(self.account_list.count()):
+            item = self.account_list.item(index)
+            if str(item.data(self.LOCATION_REQUEST_ROLE) or "") != request_id:
+                continue
+            label = str(item.data(self.LABEL_ROLE) or "")
+            mode = str(item.data(self.PROXY_MODE_ROLE) or "global")
+            mode_label = "全局" if mode == "global" else "自定义"
+            item.setData(self.ICON_ROLE, country_flag(code))
+            item.setData(self.STATUS_ROLE, f"{country} · {mode_label}")
+            self._render_account_item(item)
+            return
+
+    def _render_account_item(self, item):
+        icon = str(item.data(self.ICON_ROLE) or "🌐")
+        label = str(item.data(self.LABEL_ROLE) or "")
+        unread = int(item.data(self.UNREAD_ROLE) or 0)
+        status = str(item.data(self.STATUS_ROLE) or "")
+        notification = str(item.data(self.NOTIFICATION_ROLE) or "")
+        badge = f"  🔴 {unread}" if unread else ""
+        detail = notification or status
+        item.setText(f"{icon}  {label}{badge}\n    {detail}")
+        item.setSizeHint(QSize(0, 66 if notification else 58))
+
+    def _item_for_profile(self, profile_name):
+        for index in range(self.account_list.count()):
+            item = self.account_list.item(index)
+            if str(item.data(self.PROFILE_ROLE) or "") == profile_name:
+                return item
+        return None
+
+    def _on_unread_count(self, profile_name, count):
+        item = self._item_for_profile(profile_name)
+        if item is None:
+            return
+        item.setData(self.UNREAD_ROLE, max(0, count))
+        self._render_account_item(item)
+
+    def _on_browser_notification(self, profile_name, title, message):
+        item = self._item_for_profile(profile_name)
+        if item is None:
+            return
+        summary = (message or title or "新消息").replace("\n", " ").strip()
+        if len(summary) > 32:
+            summary = summary[:31] + "…"
+        item.setData(self.NOTIFICATION_ROLE, f"新消息：{summary}")
+        self._render_account_item(item)
+
+    def _on_phone_number(self, profile_name, number):
+        item = self._item_for_profile(profile_name)
+        if item is None:
+            return
+        item.setData(self.PHONE_ROLE, number)
+        item.setData(self.LABEL_ROLE, number)
+        self._render_account_item(item)
+        self._save_accounts()
 
     def _add_account(self):
-        dialog = AddAccountDialog(self)
+        dialog = AddAccountDialog(self.global_proxy_url, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         data = dialog.get_data()
-        name = data["name"]
-        if not name:
-            QMessageBox.warning(self, "名称无效", "账号名称不能为空。")
+        try:
+            if data["proxy_mode"] == "global" and not self.global_proxy_url:
+                raise ValueError("请先在菜单中配置全局代理，或选择自定义代理")
+            if data["proxy_mode"] == "custom" and not data["proxy_url"]:
+                raise ValueError("请填写自定义代理地址")
+            if data["proxy_mode"] in {"global", "custom"}:
+                parse_proxy_url(
+                    self.global_proxy_url if data["proxy_mode"] == "global" else data["proxy_url"]
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "代理地址无效", str(exc))
             return
 
-        profile_name = re.sub(r"[^\w\-]", "_", name)
-        if not profile_name:
-            QMessageBox.warning(self, "名称无效", "账号名称包含非法字符，请换一个。")
-            return
+        # 登录完成前使用临时名称；检测到本人号码后会自动替换。
+        profile_name = f"account_{uuid.uuid4().hex}"
+        name = f"新账号 {self.account_list.count() + 1}"
 
-        existing_labels = [self.tabs.tabText(i) for i in range(self.tabs.count())]
-        if name in existing_labels:
-            QMessageBox.warning(self, "重复名称", f"已存在名为「{name}」的标签页。")
-            return
-
-        index = self._create_account_tab(profile_name, name, proxy_url=data["proxy_url"])
-        self.tabs.setCurrentIndex(index)
+        index = self._create_account_tab(
+            profile_name,
+            name,
+            proxy_url=data["proxy_url"],
+            proxy_mode=data["proxy_mode"],
+        )
+        self._save_accounts()
+        self.account_list.setCurrentRow(index)
         self._schedule_inactive_unload(index)
         self._balance_tab_resources(index)
         
-        self._save_accounts()  # 新增：保存配置
+
+    def _edit_account(self, index):
+        self._edit_accounts([index])
+
+    def _selected_account_indices(self):
+        return sorted({self.account_list.row(item) for item in self.account_list.selectedItems()})
+
+    def _open_selected_accounts(self):
+        indices = self._selected_account_indices()
+        if not indices and self.account_list.currentRow() >= 0:
+            indices = [self.account_list.currentRow()]
+        for index in indices:
+            account = self._account_at(index)
+            if account is not None:
+                account.show_account()
+
+    def _edit_selected_accounts(self):
+        indices = self._selected_account_indices()
+        if not indices and self.account_list.currentRow() >= 0:
+            indices = [self.account_list.currentRow()]
+        self._edit_accounts(indices)
+
+    def _edit_accounts(self, indices):
+        indices = [index for index in indices if self._account_at(index) is not None]
+        if not indices:
+            return
+        first = self._account_at(indices[0])
+        title_hint = "批量编辑" if len(indices) > 1 else self._account_label(indices[0])
+        dialog = AddAccountDialog(
+            self.global_proxy_url,
+            self,
+            name=title_hint,
+            proxy_mode=getattr(first, "proxy_mode", "global"),
+            proxy_url=getattr(first, "custom_proxy_url", ""),
+        )
+        if len(indices) > 1:
+            dialog.setWindowTitle(f"批量修改代理（{len(indices)} 个账号）")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.get_data()
+        try:
+            if data["proxy_mode"] == "global" and not self.global_proxy_url:
+                raise ValueError("请先配置全局代理，或选择其他代理方式")
+            if data["proxy_mode"] == "custom" and not data["proxy_url"]:
+                raise ValueError("请填写自定义代理地址")
+            if data["proxy_mode"] in {"global", "custom"}:
+                parse_proxy_url(
+                    self.global_proxy_url if data["proxy_mode"] == "global" else data["proxy_url"]
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "代理地址无效", str(exc))
+            return
+
+        effective_proxy = self.global_proxy_url if data["proxy_mode"] == "global" else (
+            data["proxy_url"] if data["proxy_mode"] == "custom" else ""
+        )
+        accounts = []
+        for index in indices:
+            account = self._account_at(index)
+            item = self.account_list.item(index)
+            if account is None or item is None:
+                continue
+            item.setData(self.PROXY_MODE_ROLE, data["proxy_mode"])
+            account.proxy_mode = data["proxy_mode"]
+            account.custom_proxy_url = data["proxy_url"] if data["proxy_mode"] == "custom" else ""
+            account.proxy_url = effective_proxy
+            self._set_account_location_pending(item, effective_proxy, data["proxy_mode"])
+            accounts.append(account)
+        self._save_accounts()
+        for account in accounts:
+            account.restart()
+
+    def _delete_selected_accounts(self):
+        indices = self._selected_account_indices()
+        if not indices and self.account_list.currentRow() >= 0:
+            indices = [self.account_list.currentRow()]
+        if not indices:
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除账号",
+            f"确定删除选中的 {len(indices)} 个账号吗？\n登录数据目录会保留。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for index in sorted(indices, reverse=True):
+            self._close_tab(index)
 
     def _save_accounts(self):
         """把当前所有打开的标签页账号信息保存到 JSON"""
         accounts = []
-        for i in range(self.tabs.count()):
-            widget = self.tabs.widget(i)
-            if isinstance(widget, WhatsAppAccount):
+        for i in range(self.account_list.count()):
+            widget = self._account_at(i)
+            if isinstance(widget, AccountProcessPanel):
                 accounts.append({
-                    "label": self.tabs.tabText(i),
-                    "profile_name": widget.profile.storageName(),
-                    "proxy_url": getattr(widget, "proxy_url", "")
+                    "label": self._account_label(i),
+                    "profile_name": widget.profile_name,
+                    "proxy_mode": getattr(widget, "proxy_mode", "global"),
+                    "proxy_url": getattr(widget, "custom_proxy_url", ""),
+                    "phone": getattr(widget, "phone_number", ""),
                 })
                 
         try:
-            with open(get_config_file_path(), "w", encoding="utf-8") as f:
-                json.dump(accounts, f, ensure_ascii=False, indent=4)
-        except Exception as e:
+            save_account_configs(accounts)
+        except OSError as e:
             print(f"保存账号失败: {e}")
 
     def _load_accounts(self):
         """启动时从 JSON 加载账号并恢复标签页"""
-        config_path = get_config_file_path()
-        if not os.path.exists(config_path):
-            return
-            
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                accounts = json.load(f)
-                
+            accounts = load_account_configs()
             for acc in accounts:
                 label = acc.get("label")
                 profile_name = acc.get("profile_name")
                 proxy_url = acc.get("proxy_url", "")
+                proxy_mode = acc.get("proxy_mode")
+                phone = str(acc.get("phone") or "")
+                if proxy_mode not in {"none", "system", "global", "custom"}:
+                    proxy_mode = "custom" if proxy_url else "global"
                 
                 if label and profile_name:
-                    account = WhatsAppAccount(profile_name, proxy_url=proxy_url)
-                    self.tabs.addTab(account, label)
+                    self._create_account_tab(
+                        profile_name,
+                        label,
+                        proxy_url=proxy_url,
+                        proxy_mode=proxy_mode,
+                        phone=phone,
+                    )
+            if self.account_list.count():
+                selected_profile = str(self.settings.get("selected_profile") or "")
+                selected_row = 0
+                for row in range(self.account_list.count()):
+                    if str(self.account_list.item(row).data(self.PROFILE_ROLE)) == selected_profile:
+                        selected_row = row
+                        break
+                self.account_list.setCurrentRow(selected_row)
         except Exception as e:
             print(f"加载账号失败: {e}")
 
     # ---------- 标签页右键菜单 ----------
 
     def _show_tab_context_menu(self, pos):
-        tab_bar = self.tabs.tabBar()
-        index = tab_bar.tabAt(pos)
+        item = self.account_list.itemAt(pos)
+        index = self.account_list.row(item) if item else -1
         if index < 0:
             return
 
         menu = QMenu(self)
+
+        edit_action = QAction("编辑账号", self)
+        edit_action.triggered.connect(lambda: self._edit_account(index))
+        menu.addAction(edit_action)
+
+        menu.addSeparator()
 
         close_action = QAction("关闭此标签页", self)
         close_action.triggered.connect(lambda: self._close_tab(index))
@@ -192,14 +500,17 @@ class MainWindow(QMainWindow):
         close_others.triggered.connect(lambda: self._close_other_tabs(index))
         menu.addAction(close_others)
 
-        menu.exec(tab_bar.mapToGlobal(pos))
+        menu.exec(self.account_list.viewport().mapToGlobal(pos))
 
     def _close_tab(self, index):
-        widget = self.tabs.widget(index)
+        widget = self._account_at(index)
         if widget is None:
             return
 
-        self.tabs.removeTab(index)
+        widget.terminate()
+
+        self.account_list.takeItem(index)
+        self.pages.removeWidget(widget)
 
         timer = self._inactive_timers.pop(index, None)
         if timer is not None:
@@ -210,11 +521,11 @@ class MainWindow(QMainWindow):
 
         self._rebuild_tab_indices()
         widget.deleteLater()
-        
+        self._update_empty_state()
         self._save_accounts()  # 新增：保存配置
 
     def _close_other_tabs(self, keep_index):
-        for i in range(self.tabs.count() - 1, -1, -1):
+        for i in range(self.account_list.count() - 1, -1, -1):
             if i != keep_index:
                 self._close_tab(i)
 
@@ -225,22 +536,30 @@ class MainWindow(QMainWindow):
             timer.deleteLater()
         self._inactive_timers = {}
         self._suspended_tabs = set()
+        self._active_index = -1
 
-        for i in range(self.tabs.count()):
-            widget = self.tabs.widget(i)
-            if not isinstance(widget, WhatsAppAccount):
+        for i in range(self.account_list.count()):
+            widget = self._account_at(i)
+            if not isinstance(widget, AccountProcessPanel):
                 continue
             timer = QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(lambda idx=i: self._suspend_tab(idx))
             self._inactive_timers[i] = timer
 
-        self._schedule_inactive_unload(self.tabs.currentIndex())
+        current_row = self.account_list.currentRow()
+        self._schedule_inactive_unload(current_row)
+        if current_row >= 0:
+            self._on_tab_changed(current_row)
 
     # ---------- 顶部栏与样式 ----------
 
     def _setup_actions_menu(self):
         self._actions_menu = QMenu(self)
+
+        global_proxy = QAction("全局代理设置", self)
+        global_proxy.triggered.connect(self._configure_global_proxy)
+        self._actions_menu.addAction(global_proxy)
 
         add_account = QAction("添加账号", self)
         add_account.triggered.connect(self._add_account)
@@ -260,172 +579,243 @@ class MainWindow(QMainWindow):
         check_updates.triggered.connect(lambda: self._check_for_updates(manual=True))
         self._actions_menu.addAction(check_updates)
 
-    def _setup_top_bar_controls(self):
-        self.tabs.setDocumentMode(True)
-        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
-        self.tabs.tabBar().setExpanding(False)
-        self.tabs.tabBar().installEventFilter(self)
-        
-        tab_height = TOP_BAR_HEIGHT
-        button_height = tab_height
-        self.tabs.tabBar().setFixedHeight(tab_height)
+    def _configure_global_proxy(self):
+        dialog = GlobalProxyDialog(self.global_proxy_url, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        proxy_url = dialog.proxy_url()
+        try:
+            parse_proxy_url(proxy_url)
+        except ValueError as exc:
+            QMessageBox.warning(self, "代理地址无效", str(exc))
+            return
 
-        self._corner_controls = QWidget(self.tabs)
-        self._corner_controls.setObjectName("corner_controls")
-        layout = QHBoxLayout(self._corner_controls)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self._corner_controls.installEventFilter(self)
-        self._corner_controls.setFixedHeight(tab_height)
+        if proxy_url == self.global_proxy_url:
+            return
+        self.global_proxy_url = proxy_url
+        self.settings["global_proxy_url"] = proxy_url
+        try:
+            save_settings(self.settings)
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
 
-        layout.addStretch()
+        for row in range(self.account_list.count()):
+            item = self.account_list.item(row)
+            if item.data(self.PROXY_MODE_ROLE) != "global":
+                continue
+            account = self._account_at(row)
+            if account is not None:
+                account.proxy_url = proxy_url
+                account.restart()
+            self._set_account_location_pending(item, proxy_url, "global")
 
-        settings_btn = QToolButton(self._corner_controls)
-        settings_btn.setText("⚙")
+        message = "全局代理已保存。"
+        current_row = self.account_list.currentRow()
+        current_item = self.account_list.item(current_row)
+        if current_item is not None and current_item.data(self.PROXY_MODE_ROLE) == "global":
+            account = self._account_at(current_row)
+            if account is not None:
+                account.show_account()
+            message += "\n当前账号已重新连接。"
+        QMessageBox.information(self, "全局代理", message)
+
+    def _setup_contact_layout(self):
+        central = QWidget(self)
+        central.setObjectName("central")
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.setCentralWidget(central)
+
+        self._toolbar = QFrame(central)
+        self._toolbar.setObjectName("toolbar")
+        self._toolbar.setFixedHeight(48)
+        self._toolbar.installEventFilter(self)
+        toolbar_layout = QHBoxLayout(self._toolbar)
+        toolbar_layout.setContentsMargins(18, 0, 8, 0)
+        toolbar_layout.setSpacing(6)
+
+        title = QLabel("WhatsApp Multi-Account", self._toolbar)
+        title.setObjectName("app_title")
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addStretch()
+
+        open_btn = QPushButton("打开选中", self._toolbar)
+        open_btn.setObjectName("toolbar_action")
+        open_btn.clicked.connect(self._open_selected_accounts)
+        toolbar_layout.addWidget(open_btn)
+
+        edit_btn = QPushButton("修改代理", self._toolbar)
+        edit_btn.setObjectName("toolbar_action")
+        edit_btn.clicked.connect(self._edit_selected_accounts)
+        toolbar_layout.addWidget(edit_btn)
+
+        delete_btn = QPushButton("删除选中", self._toolbar)
+        delete_btn.setObjectName("toolbar_danger")
+        delete_btn.clicked.connect(self._delete_selected_accounts)
+        toolbar_layout.addWidget(delete_btn)
+
+        add_btn = QPushButton("＋  添加账号", self._toolbar)
+        add_btn.setObjectName("add_account")
+        add_btn.clicked.connect(self._add_account)
+        toolbar_layout.addWidget(add_btn)
+
+        settings_btn = QToolButton(self._toolbar)
+        settings_btn.setText("⋯")
         settings_btn.setToolTip("菜单")
         settings_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         settings_btn.setMenu(self._actions_menu)
-        settings_btn.setFixedSize(32, button_height)
-        settings_btn.setObjectName("title_control")
-        layout.addWidget(settings_btn)
+        settings_btn.setObjectName("toolbar_button")
+        settings_btn.setFixedSize(38, 32)
+        toolbar_layout.addWidget(settings_btn)
 
-        min_btn = QPushButton("−", self._corner_controls)
-        min_btn.setToolTip("最小化")
-        min_btn.setFixedSize(32, button_height)
-        min_btn.setAutoDefault(False)
-        min_btn.setDefault(False)
-        min_btn.setObjectName("title_control")
-        min_btn.clicked.connect(self.showMinimized)
-        layout.addWidget(min_btn)
+        if platform.system() != "Darwin":
+            min_btn = QPushButton("−", self._toolbar)
+            min_btn.setObjectName("window_button")
+            min_btn.clicked.connect(self.showMinimized)
+            toolbar_layout.addWidget(min_btn)
 
-        self._max_btn = QPushButton("□", self._corner_controls)
-        self._max_btn.setToolTip("最大化")
-        self._max_btn.setFixedSize(32, button_height)
-        self._max_btn.setAutoDefault(False)
-        self._max_btn.setDefault(False)
-        self._max_btn.setObjectName("title_control")
-        self._max_btn.clicked.connect(self._toggle_maximize)
-        layout.addWidget(self._max_btn)
+            self._max_btn = QPushButton("□", self._toolbar)
+            self._max_btn.setObjectName("window_button")
+            self._max_btn.clicked.connect(self._toggle_maximize)
+            toolbar_layout.addWidget(self._max_btn)
 
-        close_btn = QPushButton("×", self._corner_controls)
-        close_btn.setToolTip("关闭")
-        close_btn.setFixedSize(32, button_height)
-        close_btn.setAutoDefault(False)
-        close_btn.setDefault(False)
-        close_btn.setObjectName("title_control")
-        close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn)
+            close_btn = QPushButton("×", self._toolbar)
+            close_btn.setObjectName("close_button")
+            close_btn.clicked.connect(self.close)
+            toolbar_layout.addWidget(close_btn)
 
-        self.tabs.setCornerWidget(self._corner_controls, Qt.Corner.TopRightCorner)
-        self.tabs.tabBar().setDrawBase(False)
+        root.addWidget(self._toolbar)
 
-        # 标签栏右键菜单
-        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tabs.tabBar().customContextMenuRequested.connect(self._show_tab_context_menu)
+        body = QWidget(central)
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
 
-        # --- 核心美化样式 ---
-        self.tabs.setStyleSheet(
-            f"""
-            /* 标签页整体背景 */
-            QTabWidget::pane {{ 
-                border: none; 
-                background: #1a1b1e; 
-            }}
-            
-            /* 基础标签页样式 */
-            QTabBar::tab {{
-                min-height: {tab_height - 6}px;
-                max-height: {tab_height - 6}px;
-                padding: 3px 12px;
-                margin-top: 6px;     
-                margin-right: 2px;   
-                background: transparent;
-                color: #9ba1a9;
-                border: none;
-                border-radius: 6px;  
-                font-size: 13px;
-            }}
-            
-            /* 悬浮状态 */
-            QTabBar::tab:hover:!selected {{
-                background: #2c2f36;
-                color: #ffffff;
-            }}
-            
-            /* 选中状态 */
-            QTabBar::tab:selected {{
-                background: #363b44;
-                color: #ffffff;
-                font-weight: bold;
-            }}
-            
-            /* 顶部控制按钮栏的背景色 */
-            QWidget#corner_controls {{
-                background: #1a1b1e;
-            }}
-            
-            /* 顶部控制按钮的样式 */
-            QToolButton, QPushButton {{
-                border: none;
-                padding: 0px;
-                border-radius: 0px;
-                color: #9ba1a9;
-                font-weight: 600;
-                font-size: 15px;
-                outline: none;
-            }}
-            QToolButton:hover, QPushButton:hover {{ 
-                background: #2c2f36; 
-                color: #ffffff; 
-            }}
-            QToolButton:pressed, QPushButton:pressed {{ 
-                background: #1f6feb; 
-                color: #ffffff; 
-            }}
-            QToolButton::menu-indicator {{ 
-                image: none; 
-                width: 0px; 
-            }}
+        sidebar = QFrame(body)
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(240)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(12, 16, 12, 12)
+        sidebar_layout.setSpacing(10)
+
+        contacts_title = QLabel("账号", sidebar)
+        contacts_title.setObjectName("section_title")
+        sidebar_layout.addWidget(contacts_title)
+
+        self.account_list = QListWidget(sidebar)
+        self.account_list.setObjectName("account_list")
+        self.account_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.account_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.account_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.account_list.customContextMenuRequested.connect(self._show_tab_context_menu)
+        self.account_list.currentRowChanged.connect(self._on_tab_changed)
+        sidebar_layout.addWidget(self.account_list, 1)
+
+        body_layout.addWidget(sidebar)
+
+        self.pages = QStackedWidget(body)
+        self.pages.setObjectName("pages")
+        empty = QWidget(self.pages)
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_title = QLabel("还没有 WhatsApp 账号", empty)
+        empty_title.setObjectName("empty_title")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_title)
+        empty_hint = QLabel("添加一个账号后，在左侧像通讯录一样快速切换", empty)
+        empty_hint.setObjectName("empty_hint")
+        empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_hint)
+        empty_add = QPushButton("添加第一个账号", empty)
+        empty_add.setObjectName("empty_add")
+        empty_add.clicked.connect(self._add_account)
+        empty_layout.addWidget(empty_add, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.pages.addWidget(empty)
+        body_layout.addWidget(self.pages, 1)
+        root.addWidget(body, 1)
+
+        self.setStyleSheet(
+            """
+            QWidget#central, QStackedWidget#pages { background: #f7f8fa; }
+            QFrame#toolbar { background: #202c33; border-bottom: 1px solid #111b21; }
+            QLabel#app_title { color: white; font-size: 15px; font-weight: 600; }
+            QPushButton#add_account, QPushButton#sidebar_add, QPushButton#empty_add {
+                background: #25d366; color: white; border: none; border-radius: 7px;
+                padding: 8px 14px; font-weight: 600;
+            }
+            QPushButton#add_account:hover, QPushButton#sidebar_add:hover,
+            QPushButton#empty_add:hover { background: #1ebe5d; }
+            QPushButton#toolbar_action, QPushButton#toolbar_danger {
+                color: #d1d7db; background: #2f3d44; border: none;
+                border-radius: 6px; padding: 7px 11px;
+            }
+            QPushButton#toolbar_action:hover { background: #3f515a; color: white; }
+            QPushButton#toolbar_danger:hover { background: #b33a3a; color: white; }
+            QToolButton#toolbar_button, QPushButton#window_button, QPushButton#close_button {
+                color: #d1d7db; background: transparent; border: none;
+                min-width: 34px; min-height: 30px; font-size: 18px;
+            }
+            QToolButton#toolbar_button:hover, QPushButton#window_button:hover {
+                background: #374248; border-radius: 5px;
+            }
+            QPushButton#close_button:hover { background: #d9534f; color: white; }
+            QToolButton::menu-indicator { image: none; width: 0px; }
+            QFrame#sidebar { background: #ffffff; border-right: 1px solid #e4e7eb; }
+            QLabel#section_title { color: #667781; font-size: 12px; font-weight: 700; }
+            QListWidget#account_list { border: none; background: transparent; outline: none; }
+            QListWidget#account_list::item {
+                color: #263238; border: none; border-radius: 8px; padding: 0 14px;
+                margin: 2px 0; font-size: 14px;
+            }
+            QListWidget#account_list::item:hover { background: #f0f2f5; }
+            QListWidget#account_list::item:selected {
+                background: #d9fdd3; color: #111b21; font-weight: 600;
+            }
+            QLabel#empty_title { color: #263238; font-size: 22px; font-weight: 600; }
+            QLabel#empty_hint { color: #667781; font-size: 14px; margin: 6px 0 18px 0; }
             """
         )
+
+    def _update_empty_state(self):
+        if self.account_list.count() == 0:
+            self.pages.setCurrentIndex(0)
+            return
+        row = self.account_list.currentRow()
+        if row < 0:
+            self.account_list.setCurrentRow(0)
 
     def _toggle_maximize(self):
         if self.isMaximized():
             self.showNormal()
-            self._max_btn.setText("□")
-            self._max_btn.setToolTip("最大化")
+            if hasattr(self, "_max_btn"):
+                self._max_btn.setText("□")
+                self._max_btn.setToolTip("最大化")
             return
         self.showMaximized()
-        self._max_btn.setText("❐")
-        self._max_btn.setToolTip("向下还原")
+        if hasattr(self, "_max_btn"):
+            self._max_btn.setText("❐")
+            self._max_btn.setToolTip("向下还原")
 
     def eventFilter(self, obj, event):
-        tab_bar = self.tabs.tabBar()
-        draggable_sources = {
-            tab_bar,
-            getattr(self, "_corner_controls", None),
-        }
-        if obj in draggable_sources:
+        if obj is getattr(self, "_toolbar", None):
             child = None
-            clicked_on_tab = False
             if hasattr(event, "position"):
                 pos = event.position().toPoint()
                 child = obj.childAt(pos)
-                if obj is tab_bar and tab_bar.tabAt(pos) >= 0:
-                    clicked_on_tab = True
 
             if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
-                if clicked_on_tab:
-                    return super().eventFilter(obj, event)
-                if child and child.objectName() == "title_control":
+                if child and child.objectName() in {"add_account", "toolbar_action", "toolbar_danger", "toolbar_button", "window_button", "close_button"}:
                     return super().eventFilter(obj, event)
                 self._toggle_maximize()
                 return True
 
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                if clicked_on_tab:
+                if child and child.objectName() in {"add_account", "toolbar_action", "toolbar_danger", "toolbar_button", "window_button", "close_button"}:
                     return super().eventFilter(obj, event)
-                if child and child.objectName() == "title_control":
+
+                if platform.system() == "Darwin":
                     return super().eventFilter(obj, event)
 
                 handle = self.windowHandle()
@@ -455,18 +845,17 @@ class MainWindow(QMainWindow):
     # ---------- 标签页资源管理 ----------
 
     def _current_account(self):
-        widget = self.tabs.currentWidget()
-        return widget if isinstance(widget, WhatsAppAccount) else None
+        return self._account_at(self.account_list.currentRow())
 
     def _clear_current_cache(self):
         account = self._current_account()
         if not account:
             return
-        profile = account.page().profile()
-        profile.clearHttpCache()
-        profile.cookieStore().deleteAllCookies()
-        profile.clearAllVisitedLinks()
-        QMessageBox.information(self, "缓存已清除", "已清除当前标签页的缓存和 Cookie。")
+        QMessageBox.information(
+            self,
+            "独立账号进程",
+            "为避免破坏 WhatsApp 登录状态，独立进程模式不在运行中清除账号数据。",
+        )
 
     def _open_downloads(self):
         downloads_path = os.path.expanduser("~/Downloads/WhatsApp")
@@ -477,77 +866,59 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(downloads_path))
 
     def _on_tab_changed(self, index):
-        self._resume_tab_if_suspended(index)
-        self._schedule_inactive_unload(index)
-        self._balance_tab_resources(index)
-        widget = self.tabs.widget(index)
-        if isinstance(widget, WhatsAppAccount):
-            widget.setFocus(Qt.FocusReason.TabFocusReason)
+        if index < 0:
+            self.pages.setCurrentIndex(0)
+            return
+
+        previous_index = self._active_index
+        if previous_index >= 0 and previous_index != index:
+            previous = self._account_at(previous_index)
+            if previous is not None:
+                previous.hide_account()
+
+        widget = self._account_at(index)
+        if widget is None:
+            return
+        self._active_index = index
+        self.pages.setCurrentIndex(index + 1)
+        item = self.account_list.item(index)
+        if item is not None:
+            self.settings["selected_profile"] = str(item.data(self.PROFILE_ROLE) or "")
+            try:
+                save_settings(self.settings)
+            except OSError as exc:
+                print(f"保存当前账号失败: {exc}")
+        widget.show_account()
 
     def _schedule_inactive_unload(self, active_index):
-        for i in range(self.tabs.count()):
-            widget = self.tabs.widget(i)
-            if not isinstance(widget, WhatsAppAccount):
-                continue
-
-            timer = self._inactive_timers.get(i)
-            if timer is None:
-                timer = QTimer(self)
-                timer.setSingleShot(True)
-                timer.timeout.connect(lambda idx=i: self._suspend_tab(idx))
-                self._inactive_timers[i] = timer
-
-            if i == active_index:
-                timer.stop()
-            else:
-                timer.start(INACTIVE_UNLOAD_MS)
+        return
 
     def _suspend_tab(self, index):
-        if index == self.tabs.currentIndex():
-            return
-
-        widget = self.tabs.widget(index)
-        if not isinstance(widget, WhatsAppAccount):
-            return
-        if index in self._suspended_tabs:
-            return
-
-        widget.stop()
-        widget.setUrl(QUrl("about:blank"))
-        self._suspended_tabs.add(index)
+        return
 
     def _resume_tab_if_suspended(self, index):
-        if index not in self._suspended_tabs:
-            return
-        widget = self.tabs.widget(index)
-        if not isinstance(widget, WhatsAppAccount):
-            return
-        self._suspended_tabs.discard(index)
-        widget.setUrl(QUrl(WHATSAPP_WEB_URL))
+        return
 
     def _balance_tab_resources(self, active_index):
-        if not ENABLE_LIFECYCLE_FREEZE:
-            return
+        return
 
-        from PyQt6.QtWebEngineCore import QWebEnginePage
-
-        lifecycle_enum = getattr(QWebEnginePage, "LifecycleState", None)
-        if lifecycle_enum is None:
-            return
-
-        active_state = getattr(lifecycle_enum, "Active", None)
-        frozen_state = getattr(lifecycle_enum, "Frozen", None)
-        if active_state is None or frozen_state is None:
-            return
-
-        for i in range(self.tabs.count()):
-            widget = self.tabs.widget(i)
-            if not isinstance(widget, WhatsAppAccount):
-                continue
-            page = widget.page()
-            target_state = active_state if i == active_index else frozen_state
-            if page.lifecycleState() != target_state:
-                page.setLifecycleState(target_state)
+    def closeEvent(self, event):
+        """退出前保存账号清单、代理选择和当前账号。"""
+        self._save_accounts()
+        for index in range(self.account_list.count()):
+            account = self._account_at(index)
+            if account is not None:
+                account.terminate()
+        current = self.account_list.currentItem()
+        if current is not None:
+            self.settings["selected_profile"] = str(
+                current.data(self.PROFILE_ROLE) or ""
+            )
+        try:
+            save_settings(self.settings)
+        except OSError as exc:
+            print(f"保存应用设置失败: {exc}")
+        super().closeEvent(event)
 
     # ---------- 更新检查 ----------
 
