@@ -92,6 +92,16 @@ if __name__ == "__main__":
             window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
             if worker_flag == "--background-account-worker":
                 window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            elif worker_flag == "--windows-account-worker":
+                # 工作窗口只用于嵌入主程序：先放到屏幕外且不激活，避免
+                # QWindow.fromWinId 接管前短暂显示成独立窗口或任务栏窗口。
+                window.setWindowFlags(
+                    window.windowFlags()
+                    | Qt.WindowType.Tool
+                    | Qt.WindowType.FramelessWindowHint
+                )
+                window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                window.move(-32000, -32000)
             account = WhatsAppAccount(profile, proxy_url=proxy)
             window.setCentralWidget(account)
             window.resize(1200, 900); window.show()

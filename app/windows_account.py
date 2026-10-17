@@ -3,7 +3,7 @@ import os
 import sys
 import time
 
-from PyQt6.QtCore import QProcess, QTimer, pyqtSignal
+from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QWindow
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -100,8 +100,10 @@ class WindowsAccountProcess(QWidget):
         if hwnd and self._container is None:
             self._foreign = QWindow.fromWinId(hwnd)
             self._container = QWidget.createWindowContainer(self._foreign, self)
+            self._container.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.layout.replaceWidget(self.label, self._container)
             self.label.hide()
+            self._container.show()
         phone = str(state.get("phone") or "")
         if phone and phone != self.phone_number:
             self.phone_number = phone; self.phone_number_changed.emit(phone)
