@@ -90,6 +90,25 @@ def apply_proxy_mode(mode, value=None):
     return apply_application_proxy(value)
 
 
+def prepare_chromium_proxy(mode, value=None):
+    """在 QWebEngine 初始化前准备代理，并返回 Chromium 启动参数。"""
+    if mode == "system":
+        apply_proxy_mode(mode, value)
+        return ""
+    if mode == "none" or not value:
+        apply_proxy_mode("none")
+        return "--no-proxy-server"
+
+    config = parse_proxy_url(value)
+    gateway = _start_gateway(config)
+    host, port = gateway.server_address
+    QNetworkProxyFactory.setUseSystemConfiguration(False)
+    QNetworkProxy.setApplicationProxy(
+        QNetworkProxy(QNetworkProxy.ProxyType.HttpProxy, host, port)
+    )
+    return f"--proxy-server=http://{host}:{port}"
+
+
 class _ThreadingProxyServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -208,15 +227,7 @@ def _split_connect_target(target):
     return parsed.hostname, parsed.port or 443
 
 
-def _resolved_target(host, port):
-    addresses = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-    if not addresses:
-        raise OSError(f"无法解析 {host}")
-    return addresses[0][4][0], port
-
-
 def _open_upstream_tunnel(config, host, port):
-    target_ip, target_port = _resolved_target(host, port)
     connection = socket.create_connection((config.host, config.port), timeout=15)
     connection.settimeout(30)
     try:
@@ -224,9 +235,11 @@ def _open_upstream_tunnel(config, host, port):
             context = ssl.create_default_context()
             connection = context.wrap_socket(connection, server_hostname=config.host)
         if config.scheme == "socks5":
-            _socks5_connect(connection, config, target_ip, target_port)
+            # 域名必须交给上游代理解析。若先在本机解析，Windows 当前
+            # VPN/国内 DNS 可能返回代理无法访问或被污染的 WhatsApp IP。
+            _socks5_connect(connection, config, host, port)
         else:
-            _http_connect(connection, config, target_ip, target_port, host)
+            _http_connect(connection, config, host, port)
         connection.settimeout(None)
         return connection
     except Exception:
@@ -242,7 +255,7 @@ def open_proxy_tunnel(value, host, port=443):
     return _open_upstream_tunnel(config, host, port)
 
 
-def _socks5_connect(connection, config, target_ip, target_port):
+def _socks5_connect(connection, config, target_host, target_port):
     methods = b"\x00\x02" if config.username else b"\x00"
     connection.sendall(bytes((5, len(methods))) + methods)
     version, method = _recv_exact(connection, 2)
@@ -258,8 +271,15 @@ def _socks5_connect(connection, config, target_ip, target_port):
         )
         if _recv_exact(connection, 2) != b"\x01\x00":
             raise OSError("SOCKS5 用户名或密码错误")
+    try:
+        address = b"\x01" + socket.inet_aton(target_host)
+    except OSError:
+        encoded_host = target_host.encode("idna")
+        if len(encoded_host) > 255:
+            raise ValueError("SOCKS5 目标域名过长")
+        address = b"\x03" + bytes((len(encoded_host),)) + encoded_host
     connection.sendall(
-        b"\x05\x01\x00\x01" + socket.inet_aton(target_ip) + target_port.to_bytes(2, "big")
+        b"\x05\x01\x00" + address + target_port.to_bytes(2, "big")
     )
     version, status, _reserved, address_type = _recv_exact(connection, 4)
     if version != 5 or status != 0:
@@ -272,10 +292,10 @@ def _socks5_connect(connection, config, target_ip, target_port):
     _recv_exact(connection, address_size + 2)
 
 
-def _http_connect(connection, config, target_ip, target_port, original_host):
+def _http_connect(connection, config, target_host, target_port):
     headers = [
-        f"CONNECT {target_ip}:{target_port} HTTP/1.1",
-        f"Host: {original_host}:{target_port}",
+        f"CONNECT {target_host}:{target_port} HTTP/1.1",
+        f"Host: {target_host}:{target_port}",
         "Proxy-Connection: Keep-Alive",
     ]
     if config.username:
@@ -360,12 +380,15 @@ def _test_socks5(connection, config, target_host, target_port):
             return False, "SOCKS5 用户名或密码错误"
 
     try:
-        target_ip = socket.gethostbyname(target_host)
-    except socket.gaierror:
-        return False, f"本机无法解析 {target_host}"
+        encoded_host = target_host.encode("idna")
+    except UnicodeError:
+        return False, f"目标域名无效：{target_host}"
+    if len(encoded_host) > 255:
+        return False, "SOCKS5 目标域名过长"
     connection.sendall(
-        b"\x05\x01\x00\x01"
-        + socket.inet_aton(target_ip)
+        b"\x05\x01\x00\x03"
+        + bytes((len(encoded_host),))
+        + encoded_host
         + target_port.to_bytes(2, "big")
     )
     version, status, _reserved, address_type = _recv_exact(connection, 4)

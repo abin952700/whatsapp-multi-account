@@ -4,27 +4,13 @@ import traceback
 import datetime
 import platform
 
-# Chromium 参数必须在导入 Qt WebEngine 前设置。macOS 不需要 Linux 的 GPU 沙盒参数。
-chromium_flags = [
-    "--enable-logging",
-    "--log-level=1",
-    "--disable-quic",
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
-]
-if platform.system() == "Linux":
-    chromium_flags.append("--disable-gpu-sandbox")
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join(chromium_flags))
-
-# 关键：必须在 QApplication 创建之前导入
-from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QIcon
-from PyQt6.QtCore import Qt
-
-from app.config import get_base_storage_dir, get_icon_path, initialize_instance
+from app.config import (
+    get_base_storage_dir,
+    get_icon_path,
+    initialize_instance,
+    load_accounts,
+    load_settings,
+)
 
 _worker_process = any(
     flag in sys.argv for flag in ("--windows-account-worker", "--background-account-worker")
@@ -36,6 +22,54 @@ if "--instance" in sys.argv:
         raise SystemExit("--instance requires a name")
     _requested_instance = sys.argv[position + 1]
 initialize_instance(_requested_instance, acquire_lock=not _worker_process)
+
+# Chromium 参数必须在导入 Qt WebEngine 前设置。macOS 不需要 Linux 的 GPU 沙盒参数。
+chromium_flags = [
+    "--enable-logging",
+    "--log-level=1",
+    "--disable-quic",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
+if platform.system() == "Linux":
+    chromium_flags.append("--disable-gpu-sandbox")
+
+# Windows 的每账号代理必须在导入 Qt WebEngine 之前配置，否则 Chromium
+# 网络服务可能已启动并忽略后续的 QNetworkProxy 设置，页面会停在 0%。
+_prepared_windows_worker_proxy = False
+if "--windows-account-worker" in sys.argv:
+    from app.proxy_extension import prepare_chromium_proxy
+
+    profile_arg = sys.argv[sys.argv.index("--windows-account-worker") + 1]
+    account_config = next(
+        item for item in load_accounts()
+        if item.get("profile_name") == profile_arg
+    )
+    proxy_mode_arg = str(account_config.get("proxy_mode") or "none")
+    custom_proxy_arg = str(account_config.get("proxy_url") or "")
+    proxy_url_arg = (
+        str(load_settings().get("global_proxy_url") or "")
+        if proxy_mode_arg == "global"
+        else custom_proxy_arg if proxy_mode_arg == "custom" else ""
+    )
+    proxy_flag = prepare_chromium_proxy(proxy_mode_arg, proxy_url_arg)
+    if proxy_flag:
+        chromium_flags.append(proxy_flag)
+    _prepared_windows_worker_proxy = True
+if _prepared_windows_worker_proxy:
+    # 主进程的环境变量会被账号进程继承，因此这里必须覆盖，不能使用
+    # setdefault，否则本账号专属的 --proxy-server 不会进入 Chromium。
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(chromium_flags)
+else:
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join(chromium_flags))
+
+# 关键：必须在 QApplication 创建之前导入
+from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt
 
 # 获取当前运行目录
 os.makedirs(get_base_storage_dir(), exist_ok=True)
@@ -92,7 +126,8 @@ if __name__ == "__main__":
             mode = str(config.get("proxy_mode") or "none")
             custom = str(config.get("proxy_url") or "")
             proxy = str(load_settings().get("global_proxy_url") or "") if mode == "global" else (custom if mode == "custom" else "")
-            apply_proxy_mode(mode, proxy)
+            if not _prepared_windows_worker_proxy:
+                apply_proxy_mode(mode, proxy)
             window = QMainWindow()
             window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
             if worker_flag == "--background-account-worker":

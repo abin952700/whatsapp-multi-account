@@ -147,6 +147,7 @@ class WhatsAppAccount(QWebEngineView):
         self._load_timeout.timeout.connect(self._on_load_timeout)
         self._timed_out = False
         self._page_loaded = False
+        self._proxy_warning = ""
         self.phone_number = ""
         self._phone_timer = QTimer(self)
         self._phone_timer.setInterval(15_000)
@@ -189,6 +190,7 @@ class WhatsAppAccount(QWebEngineView):
         """先确认代理能访问 WhatsApp，再交给 WebEngine 加载。"""
         self._proxy_check_token += 1
         token = self._proxy_check_token
+        self._proxy_warning = ""
         self._retry_button.hide()
         self._loading_label.setText("正在检测代理与 WhatsApp 的连接…")
         self.load_status_changed.emit("正在检测代理与 WhatsApp 的连接…", 0, False)
@@ -225,9 +227,9 @@ class WhatsAppAccount(QWebEngineView):
             return
         if self._page_loaded:
             return
-        warning = f"代理预检未通过：{message}\n网页仍在继续加载…"
-        self._loading_label.setText(warning)
-        self.load_status_changed.emit(warning.replace("\n", " "), 0, False)
+        # 预检是辅助诊断，不能覆盖 Chromium 的真实加载状态和进度。
+        # 部分代理会拒绝探测连接，但允许浏览器的后续连接。
+        self._proxy_warning = message
 
     def _handle_proxy_auth(self, _url, authenticator, _proxy_host):
         if self.proxy_config and self.proxy_config.username:
@@ -264,9 +266,14 @@ class WhatsAppAccount(QWebEngineView):
             self._phone_timer.start()
             QTimer.singleShot(2_000, self._detect_phone_number)
             return
-        self._loading_label.setText("WhatsApp 页面加载失败\n请检查网络或代理设置")
+        detail = f"\n代理诊断：{self._proxy_warning}" if self._proxy_warning else ""
+        self._loading_label.setText(
+            f"WhatsApp 页面加载失败\n请检查网络或代理设置{detail}"
+        )
         self.load_status_changed.emit(
-            "WhatsApp 页面加载失败，请检查网络或代理设置", 100, False
+            f"WhatsApp 页面加载失败，请检查网络或代理设置{detail}".replace("\n", " "),
+            100,
+            False,
         )
         self._retry_button.show()
         self._loading_overlay.show()
@@ -310,11 +317,14 @@ class WhatsAppAccount(QWebEngineView):
     def _on_load_timeout(self):
         self._timed_out = True
         self.stop()
+        detail = f"\n代理诊断：{self._proxy_warning}" if self._proxy_warning else ""
         self._loading_label.setText(
-            "WhatsApp 加载超时\n当前网络可以访问网站，但 WebEngine 未完成加载"
+            "WhatsApp 加载超时\nWebEngine 未完成加载" + detail
         )
         self.load_status_changed.emit(
-            "WhatsApp 加载超时：代理可连接，但 WebEngine 未完成加载", 100, False
+            ("WhatsApp 加载超时：WebEngine 未完成加载" + detail).replace("\n", " "),
+            100,
+            False,
         )
         self._retry_button.show()
         self._loading_overlay.show()
