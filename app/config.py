@@ -4,6 +4,7 @@ import sys
 import json
 import tempfile
 import re
+import shutil
 
 APP_VERSION = "1.0.1"
 GITHUB_REPO = "sejanH/whatsapp-multi-account"
@@ -21,8 +22,27 @@ _INSTANCE_LOCK = None
 
 def _application_root():
     if platform.system() == "Windows":
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "whatsapp-pyqt")
+        # 便携模式：打包后固定使用 EXE 所在目录，不能使用进程当前工作
+        # 目录，因为从快捷方式启动时工作目录可能是 System32 等位置。
+        if getattr(sys, "frozen", False):
+            program_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            program_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        portable_root = os.path.join(program_dir, "data")
+        legacy_base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        legacy_root = os.path.join(legacy_base, "whatsapp-pyqt")
+        if not os.path.exists(portable_root) and os.path.isdir(legacy_root):
+            try:
+                shutil.copytree(
+                    legacy_root,
+                    portable_root,
+                    ignore=shutil.ignore_patterns("ipc", ".instance-locks", "crash.log"),
+                )
+            except OSError:
+                # 后续创建目录时会给出真实的权限错误；迁移失败不应破坏
+                # 已保存在旧目录里的任何数据。
+                pass
+        return portable_root
     if platform.system() == "Darwin":
         return os.path.expanduser("~/Library/Application Support/WhatsAppClient")
     return os.path.expanduser("~/.config/whatsapp-pyqt")
@@ -78,7 +98,7 @@ def get_instance_name():
 
 
 def get_base_storage_dir():
-    """按平台返回账号数据存储根目录。"""
+    """返回账号数据根目录；Windows 使用程序目录下的便携数据。"""
     root = _application_root()
     # instance-1 沿用原目录，确保升级后已有账号和登录状态不丢失。
     if _INSTANCE_NAME == "instance-1":

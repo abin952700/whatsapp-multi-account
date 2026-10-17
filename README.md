@@ -92,10 +92,10 @@ macOS 数据目录：
 Windows 数据目录：
 
 ```text
-%APPDATA%\whatsapp-pyqt\
+<WhatsAppClient.exe 所在目录>\data\
 ```
 
-后续 Windows 实例同样保存在根目录的 `instances/<实例名>/` 下。
+`accounts.json`、`settings.json`、账号登录 Profile、缓存、IPC 状态和日志都会保存在该目录。后续 Windows 实例保存在 `data\instances\<实例名>\` 下。复制 EXE 时如需保留全部配置和 WhatsApp 登录状态，应同时复制整个 `data` 文件夹。
 
 ### 多开方式
 
