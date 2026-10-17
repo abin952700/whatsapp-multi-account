@@ -61,9 +61,12 @@ class WindowsAccountProcess(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
-        self.progress.setFixedHeight(6)
+        self.progress.setFormat("%p%")
+        self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress.setFixedHeight(24)
         self.progress.setStyleSheet(
-            "QProgressBar{border:0;background:#e6e9ec;}"
+            "QProgressBar{border:0;background:#e6e9ec;color:#172b32;"
+            "font-size:12px;font-weight:600;text-align:center;}"
             "QProgressBar::chunk{background:#25d366;}"
         )
         self.layout.addWidget(self.progress)
@@ -142,7 +145,8 @@ class WindowsAccountProcess(QWidget):
             self._foreign = QWindow.fromWinId(hwnd)
             self._container = QWidget.createWindowContainer(self._foreign, self)
             self._container.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            self.layout.addWidget(self._container, 1)
+            # 页面占据上方主体区域，加载状态与进度条固定显示在下方。
+            self.layout.insertWidget(0, self._container, 1)
             self._container.show()
         status = str(state.get("load_status") or "正在启动账号进程…")
         progress = max(0, min(100, int(state.get("load_progress") or 0)))
