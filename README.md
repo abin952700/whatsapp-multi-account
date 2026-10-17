@@ -159,6 +159,8 @@ crash.log           Python 层异常日志
 4. 重新应用当前账号代理；
 5. 检测代理并重新打开 WhatsApp Web。
 
+代理预检属于后台诊断，不会阻断 WebEngine 打开页面。Windows、系统 VPN 或高延迟住宅代理可能导致 socket 预检超时，但程序仍会继续使用该账号代理加载 WhatsApp，最终状态以 WebEngine 的真实加载结果为准。
+
 如果仍无法加载：
 
 - 确认相同代理能连接 `web.whatsapp.com:443`；

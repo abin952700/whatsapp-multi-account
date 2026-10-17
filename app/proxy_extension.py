@@ -306,7 +306,7 @@ def _relay(left, right):
             (right if source is left else left).sendall(data)
 
 
-def test_proxy_connection(value, target_host="web.whatsapp.com", target_port=443, timeout=10):
+def test_proxy_connection(value, target_host="web.whatsapp.com", target_port=443, timeout=20):
     """通过代理建立到目标站点的隧道，返回 (成功, 中文说明)。"""
     config = parse_proxy_url(value)
     if config is None:

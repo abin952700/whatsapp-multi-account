@@ -146,6 +146,7 @@ class WhatsAppAccount(QWebEngineView):
         self._load_timeout.setInterval(45_000)
         self._load_timeout.timeout.connect(self._on_load_timeout)
         self._timed_out = False
+        self._page_loaded = False
         self.phone_number = ""
         self._phone_timer = QTimer(self)
         self._phone_timer.setInterval(15_000)
@@ -201,6 +202,9 @@ class WhatsAppAccount(QWebEngineView):
             args=(token, self.proxy_url),
             daemon=True,
         ).start()
+        # 代理预检只用于诊断，不能阻断真实 WebEngine 请求。Windows、VPN
+        # 或高延迟住宅代理可能让 socket 预检超时，但 Chromium 链路仍可用。
+        self.setUrl(QUrl(WHATSAPP_WEB_URL))
 
     def cancel_pending_load(self):
         self._proxy_check_token += 1
@@ -218,15 +222,12 @@ class WhatsAppAccount(QWebEngineView):
         if token != self._proxy_check_token:
             return
         if success:
-            self.load_status_changed.emit("代理连接正常，正在打开 WhatsApp…", 5, False)
-            self.setUrl(QUrl(WHATSAPP_WEB_URL))
             return
-        self._load_timeout.stop()
-        self._loading_label.setText(f"WhatsApp 页面加载失败\n{message}")
-        self.load_status_changed.emit(f"代理检测失败：{message}", 0, False)
-        self._retry_button.show()
-        self._loading_overlay.show()
-        self._loading_overlay.raise_()
+        if self._page_loaded:
+            return
+        warning = f"代理预检未通过：{message}\n网页仍在继续加载…"
+        self._loading_label.setText(warning)
+        self.load_status_changed.emit(warning.replace("\n", " "), 0, False)
 
     def _handle_proxy_auth(self, _url, authenticator, _proxy_host):
         if self.proxy_config and self.proxy_config.username:
@@ -240,6 +241,7 @@ class WhatsAppAccount(QWebEngineView):
 
     def _on_load_started(self):
         self._timed_out = False
+        self._page_loaded = False
         self._load_timeout.start()
         self._loading_label.setText("正在加载 WhatsApp…")
         self.load_status_changed.emit("正在加载 WhatsApp…", 0, False)
@@ -256,6 +258,7 @@ class WhatsAppAccount(QWebEngineView):
         if self._timed_out:
             return
         if success:
+            self._page_loaded = True
             self.load_status_changed.emit("WhatsApp 加载完成", 100, True)
             self._loading_overlay.hide()
             self._phone_timer.start()
