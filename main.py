@@ -115,7 +115,7 @@ if __name__ == "__main__":
             from app.account import WhatsAppAccount
             from app.config import load_accounts, load_settings
             from app.proxy_extension import apply_proxy_mode
-            from app.windows_account import WindowsWorkerState
+            from app.windows_account import WindowsWorkerState, remove_window_from_taskbar
             profile = sys.argv[sys.argv.index(worker_flag) + 1]
             worker_token = ""
             if "--worker-token" in sys.argv:
@@ -129,12 +129,19 @@ if __name__ == "__main__":
             if not _prepared_windows_worker_proxy:
                 apply_proxy_mode(mode, proxy)
             window = QMainWindow()
-            window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            worker_window_flags = window.windowFlags() | Qt.WindowType.FramelessWindowHint
+            if worker_flag == "--windows-account-worker":
+                # 正常创建渲染表面，但不为账号进程创建单独的任务栏入口。
+                # 显示后会由主窗口的 Qt 外部窗口容器接管。
+                worker_window_flags |= Qt.WindowType.Tool
+            window.setWindowFlags(worker_window_flags)
             if worker_flag == "--background-account-worker":
                 window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
             account = WhatsAppAccount(profile, proxy_url=proxy)
             window.setCentralWidget(account)
             window.resize(1200, 900); window.show()
+            if worker_flag == "--windows-account-worker":
+                remove_window_from_taskbar(int(window.winId()))
             window._state = WindowsWorkerState(
                 profile, window, account, worker_token=worker_token
             )

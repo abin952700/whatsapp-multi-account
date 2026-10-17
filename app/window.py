@@ -353,6 +353,18 @@ class MainWindow(QMainWindow):
         if index != self._active_index:
             self._on_tab_changed(index)
 
+    def _on_account_item_clicked(self, item):
+        """点击账号号码时立即显示对应的常驻账号进程。"""
+        index = self.account_list.row(item)
+        if index < 0:
+            return
+        if index != self._active_index:
+            self._on_tab_changed(index)
+        else:
+            self.pages.setCurrentIndex(index + 1)
+        item.setData(self.NOTIFICATION_ROLE, "")
+        self._render_account_item(item)
+
     def _edit_selected_accounts(self):
         index = self.account_list.currentRow()
         self._edit_accounts([index] if index >= 0 else [])
@@ -717,6 +729,7 @@ class MainWindow(QMainWindow):
         self.account_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.account_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.account_list.currentRowChanged.connect(self._on_account_current_changed)
+        self.account_list.itemClicked.connect(self._on_account_item_clicked)
         sidebar_layout.addWidget(self.account_list, 1)
 
         body_layout.addWidget(sidebar)
@@ -885,6 +898,8 @@ class MainWindow(QMainWindow):
                 previous.cancel_pending_load()
                 previous.stop()
                 previous.setUrl(QUrl("about:blank"))
+            # Windows 账号不停止、不卸载；未激活账号仍在各自进程中
+            # 保持登录，并继续上报未读数和浏览器通知。
 
         widget = self._account_at(index)
         if widget is None:

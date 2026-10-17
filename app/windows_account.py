@@ -3,12 +3,40 @@ import os
 import sys
 import time
 import uuid
+import ctypes
+from ctypes import wintypes
 
 from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QWindow
 from PyQt6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
 from app.config import get_base_storage_dir, get_instance_name
+
+
+def remove_window_from_taskbar(hwnd):
+    """隐藏账号工作窗口的任务栏入口，不改变父窗口或渲染位置。"""
+    if sys.platform != "win32" or not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    hwnd_type = wintypes.HWND
+    user32.GetWindowLongPtrW.argtypes = [hwnd_type, ctypes.c_int]
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowLongPtrW.argtypes = [hwnd_type, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowPos.argtypes = [
+        hwnd_type, hwnd_type, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, wintypes.UINT,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+
+    gwl_exstyle = -20
+    ws_ex_appwindow = 0x00040000
+    ws_ex_toolwindow = 0x00000080
+    swp_flags = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020
+    style = int(user32.GetWindowLongPtrW(hwnd, gwl_exstyle))
+    style = (style & ~ws_ex_appwindow) | ws_ex_toolwindow
+    user32.SetWindowLongPtrW(hwnd, gwl_exstyle, style)
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, swp_flags)
 
 
 def ipc_path(profile, name):
@@ -48,6 +76,7 @@ class WindowsAccountProcess(QWidget):
         self._foreign = None
         self._container = None
         self._last_state = None
+        self._last_notification_id = ""
         self._worker_token = ""
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -81,6 +110,7 @@ class WindowsAccountProcess(QWidget):
         if self.process.state() != QProcess.ProcessState.NotRunning: return
         self._worker_token = uuid.uuid4().hex
         self._last_state = None
+        self._last_notification_id = ""
         try:
             os.unlink(ipc_path(self.profile_name, "state.json"))
         except OSError:
@@ -162,7 +192,10 @@ class WindowsAccountProcess(QWidget):
             self.phone_number = phone; self.phone_number_changed.emit(phone)
         self.unread_count_changed.emit(int(state.get("unread") or 0))
         note = str(state.get("notification") or "")
-        if note: self.browser_notification.emit("WhatsApp", note)
+        notification_id = str(state.get("notification_id") or "")
+        if note and notification_id and notification_id != self._last_notification_id:
+            self._last_notification_id = notification_id
+            self.browser_notification.emit("WhatsApp", note)
 
 
 class WindowsWorkerState:
@@ -175,6 +208,7 @@ class WindowsWorkerState:
             "phone": "",
             "unread": 0,
             "notification": "",
+            "notification_id": "",
             "load_status": "正在启动账号进程…",
             "load_progress": 0,
             "loaded": False,
@@ -188,7 +222,10 @@ class WindowsWorkerState:
         self.state["updated_at"] = time.time(); write_state(self.profile, self.state)
     def phone(self, value): self.state["phone"] = value; self.save()
     def unread(self, value): self.state["unread"] = value; self.save()
-    def notification(self, title, message): self.state["notification"] = message or title; self.save()
+    def notification(self, title, message):
+        self.state["notification"] = message or title
+        self.state["notification_id"] = uuid.uuid4().hex
+        self.save()
     def load_status(self, text, progress, loaded):
         self.state["load_status"] = text
         self.state["load_progress"] = int(progress)
