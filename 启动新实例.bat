@@ -3,11 +3,11 @@ setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
 
-if exist "dist\WhatsAppClient\WhatsAppClient.exe" (
+if exist "dist\WhatsAppClient.exe" (
     if "%~1"=="" (
-        start "" "dist\WhatsAppClient\WhatsAppClient.exe"
+        start "" "dist\WhatsAppClient.exe"
     ) else (
-        start "" "dist\WhatsAppClient\WhatsAppClient.exe" --instance "%~1"
+        start "" "dist\WhatsAppClient.exe" --instance "%~1"
     )
 ) else (
     if "%~1"=="" (

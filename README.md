@@ -134,8 +134,8 @@ Windows 可以重复双击 `启动新实例.bat`，每次自动打开一个隔�
 打包版本也可以直接多开：
 
 ```bat
-start "" "dist\WhatsAppClient\WhatsAppClient.exe"
-start "" "dist\WhatsAppClient\WhatsAppClient.exe"
+start "" "dist\WhatsAppClient.exe"
+start "" "dist\WhatsAppClient.exe"
 ```
 
 主要内容：
@@ -255,10 +255,10 @@ build.bat
 生成文件位于：
 
 ```text
-dist\WhatsAppClient\WhatsAppClient.exe
+dist\WhatsAppClient.exe
 ```
 
-分发时需要复制整个 `dist\WhatsAppClient` 目录，不能只复制 EXE。
+Windows 使用 PyInstaller 单文件模式，分发时只需复制 `dist\WhatsAppClient.exe`。Qt WebEngine 运行库会在启动时解压到临时目录，因此首次启动会比目录版稍慢。
 
 ## Linux AppImage
 

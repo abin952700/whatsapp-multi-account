@@ -17,14 +17,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo 正在打包 Windows 应用...
-.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm --windowed --name WhatsAppClient --icon whatsapp_icon.png --add-data "whatsapp_icon.png;." main.py
+echo 正在打包 Windows 单文件 EXE...
+.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm --onefile --windowed --name WhatsAppClient --icon whatsapp_icon.png --add-data "whatsapp_icon.png;." main.py
 if errorlevel 1 (
     echo [错误] 打包失败，请检查上方信息。
     pause
     exit /b 1
 )
 
-echo 打包成功：dist\WhatsAppClient\WhatsAppClient.exe
+echo 打包成功：dist\WhatsAppClient.exe
 pause
 endlocal
